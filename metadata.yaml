@@ -1,0 +1,6 @@
+name: astrbot_plugin_gemini_image
+display_name: Gemini生图
+desc: 使用gemini模型进行文生图/图生图,支持自然语言调用
+version: v1.0
+author: Railgun19457
+repo: https://github.com/railgun19457/astrbot_plugin_gemini_image
