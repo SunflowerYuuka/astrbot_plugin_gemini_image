@@ -1,0 +1,70 @@
+{
+  "use_system_provider": {
+    "description": "使用系统已有的提供商",
+    "hint": "启用后从下方选择器中选择提供商，关闭后需手动配置 API Key 和 Base URL",
+    "type": "bool",
+    "default": true
+  },
+  "provider_id": {
+    "description": "选择提供商",
+    "hint": "从系统已配置的提供商中选择一个用于图像生成",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider"
+  },
+  "api_key": {
+    "description": "Gemini API Key(s)",
+    "hint": "仅在不使用系统提供商时需要填写。支持多个 key 用于自动轮询，提高稳定性",
+    "type": "list",
+    "default": []
+  },
+  "base_url": {
+    "description": "API Base URL",
+    "hint": "仅在不使用系统提供商时需要填写。Gemini API 的基础 URL，默认为官方地址",
+    "type": "string",
+    "default": "https://generativelanguage.googleapis.com"
+  },
+  "model": {
+    "description": "生图模型",
+    "hint": "选择要使用的 Gemini 图像生成模型，选择 custom 时使用下方自定义模型名称",
+    "type": "string",
+    "default": "gemini-2.0-flash-exp-image-generation",
+    "options": [
+      "gemini-2.0-flash-exp-image-generation",
+      "gemini-2.5-flash-image",
+      "gemini-2.5-flash-image-preview",
+      "gemini-3-pro-image-preview",
+      "自定义模型"
+    ]
+  },
+  "custom_model": {
+    "description": "自定义模型名称",
+    "hint": "仅在上方模型选择 custom 时生效。填写自定义的 Gemini 图像生成模型名称",
+    "type": "string",
+    "default": ""
+  },
+  "timeout": {
+    "description": "生图超时时间（秒）",
+    "hint": "生成图片的最长等待时间，超时将返回错误",
+    "type": "int",
+    "default": 120
+  },
+  "cache_ttl": {
+    "description": "图片缓存时间（秒）",
+    "hint": "本地缓存图片的保存时间，过期后自动删除",
+    "type": "int",
+    "default": 3600
+  },
+  "max_cache_count": {
+    "description": "最大缓存数量",
+    "hint": "本地最多缓存的图片数量，超出后删除最旧的",
+    "type": "int",
+    "default": 100
+  },
+  "enable_llm_tool": {
+    "description": "启用 LLM 工具",
+    "hint": "启用后，LLM 可以在对话中自动调用图像生成功能",
+    "type": "bool",
+    "default": true
+  }
+}
