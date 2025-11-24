@@ -323,7 +323,7 @@ class GeminiImageGenerator:
         return base64.b64decode(image_base64)
 
     async def cache_image(
-        self, image_id: str, image_data: bytes, mime_type: str = "image/jpeg"
+        self, image_id: str, image_data: bytes, mime_type: str = "image/png"
     ) -> Path:
         """
         缓存图片到本地
@@ -337,7 +337,7 @@ class GeminiImageGenerator:
             缓存文件路径
         """
         # 获取文件扩展名
-        ext = mimetypes.guess_extension(mime_type) or ".jpg"
+        ext = mimetypes.guess_extension(mime_type) or ".png"
         file_path = self.cache_dir / f"{image_id}{ext}"
 
         # 保存到文件
