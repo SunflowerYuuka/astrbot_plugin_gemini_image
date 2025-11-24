@@ -243,11 +243,23 @@ class GeminiImagePlugin(Star):
             return False
 
         self.api_keys = api_keys
-        self.base_url = api_base or "https://generativelanguage.googleapis.com"
+        # 处理 base_url，移除可能的 /v1 或 /v1beta 后缀
+        self.base_url = self._normalize_base_url(
+            api_base or "https://generativelanguage.googleapis.com"
+        )
         logger.info(
             f"[Gemini Image] 使用系统提供商: {provider_id}，API Keys 数量: {len(self.api_keys)}"
         )
         return True
+
+    def _normalize_base_url(self, url: str) -> str:
+        """规范化 base_url，移除 /v1* 后缀"""
+        url = url.rstrip("/")
+        # 移除所有 /v1 开头的路径段（如 /v1, /v1beta, /v1alpha 等）
+        parts = url.rsplit("/", 1)
+        if len(parts) == 2 and parts[1].startswith("v1"):
+            return parts[0]
+        return url
 
     def _load_model_config(self) -> str:
         """加载模型配置"""
