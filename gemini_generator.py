@@ -248,12 +248,9 @@ class GeminiImageGenerator:
             "x-goog-api-key": self._get_current_api_key(),
         }
 
-        # 调试：打印实际发送的 payload 结构（不含图片数据）
-        debug_payload = {
-            "contents": payload["contents"],
-            "generationConfig": payload["generationConfig"]
-        }
-        logger.debug(f"[Gemini Image] 请求 payload: {debug_payload}")
+        # 调试：打印实际请求信息
+        logger.info(f"[Gemini Image] 请求 URL: {url}")
+        logger.debug(f"[Gemini Image] 请求 payload: {payload.get('contents', [])[0] if payload.get('contents') else 'N/A'}")
 
         async with session.post(
             url,

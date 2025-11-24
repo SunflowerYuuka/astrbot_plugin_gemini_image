@@ -80,68 +80,42 @@ class GeminiImageGenerationTool(FunctionTool[AstrAgentContext]):
     def __post_init__(self):
         """动态更新 description 以包含当前模型信息"""
         if self.plugin and hasattr(self.plugin, "model"):
-            model = self.plugin.model
-            self.description = f"使用 Gemini 模型生成图片。当前模型: {model}"
+            self.description = f"使用 Gemini 模型生成图片。当前模型: {self.plugin.model}"
 
     async def call(
         self, context: ContextWrapper[AstrAgentContext], **kwargs
     ) -> ToolExecResult:
-        prompt = kwargs.get("prompt", "")
-        aspect_ratio = kwargs.get("aspect_ratio", "1:1")
-        resolution = kwargs.get("resolution", "1K")
-        use_reference_image = kwargs.get("use_reference_image", False)
-        image_index = int(kwargs.get("reference_image_index", 0))
-
-        if not prompt:
+        if not (prompt := kwargs.get("prompt", "")):
             return "请提供图片生成的提示词"
 
-        plugin = self.plugin
-        if not plugin:
-            try:
-                plugin = context.context.context
-            except AttributeError:
-                plugin = None
-
+        plugin = self.plugin or getattr(getattr(context, "context", None), "context", None)
         if not plugin:
             return "❌ 插件初始化失败，请联系管理员"
 
-        # 获取事件
-        event = None
-        try:
-            event = context.context.event
-        except AttributeError:
-            pass
-
+        event = getattr(getattr(context, "context", None), "event", None)
         if not event:
             return "❌ 无法获取当前消息上下文"
 
-        # 根据参数决定是否使用参考图片
-        image_data = None
-        mime_type = None
-
-        if use_reference_image:
+        image_data, mime_type = None, None
+        if kwargs.get("use_reference_image", False):
             recent_images = plugin.get_recent_images(event.unified_msg_origin)
+            image_index = int(kwargs.get("reference_image_index", 0))
             if not recent_images or image_index >= len(recent_images):
-                available_count = len(recent_images) if recent_images else 0
-                return f"❌ 未找到参考图片！\n\n📷 当前可用图片数: {available_count}\n💡 请先发送图片，然后使用图生图功能"
+                return f"❌ 未找到参考图片！\n\n📷 当前可用图片数: {len(recent_images) if recent_images else 0}\n💡 请先发送图片，然后使用图生图功能"
 
-            ref_image = recent_images[image_index]
-            # 从 URL 下载图片
-            result = await plugin._download_image(ref_image["url"])
-            if not result:
+            if not (result := await plugin._download_image(recent_images[image_index]["url"])):
                 return "❌ 下载参考图片失败，请重试"
             image_data, mime_type = result
 
-        # 创建异步任务,在后台生成图片
         plugin.create_background_task(
             plugin._generate_and_send_image_async(
                 prompt=prompt,
                 image_data=image_data,
                 mime_type=mime_type,
                 unified_msg_origin=event.unified_msg_origin,
-                use_reference_image=use_reference_image,
-                aspect_ratio=aspect_ratio,
-                resolution=resolution,
+                use_reference_image=image_data is not None,
+                aspect_ratio=kwargs.get("aspect_ratio", "1:1"),
+                resolution=kwargs.get("resolution", "1K"),
             )
         )
 
@@ -206,26 +180,18 @@ class GeminiImagePlugin(Star):
         use_system_provider = self.config.get("use_system_provider", True)
         provider_id = (self.config.get("provider_id", "") or "").strip()
 
-        # 尝试从系统提供商加载配置
-        if use_system_provider and provider_id:
-            if not self._load_provider_config(provider_id):
-                self._load_default_config()
-        else:
-            if use_system_provider:
+        if not (use_system_provider and provider_id and self._load_provider_config(provider_id)):
+            if use_system_provider and not provider_id:
                 logger.warning("[Gemini Image] 未配置提供商 ID，将使用插件配置")
             self._load_default_config()
 
-        # 加载模型配置
         self.model = self._load_model_config()
-
-        # 加载其他配置
         self.timeout = self.config.get("timeout", 120)
         self.cache_ttl = self.config.get("cache_ttl", 3600)
         self.max_cache_count = self.config.get("max_cache_count", 100)
         self.enable_llm_tool = self.config.get("enable_llm_tool", True)
         self.default_aspect_ratio = self.config.get("default_aspect_ratio", "1:1")
         self.default_resolution = self.config.get("default_resolution", "1K")
-
         self._validate_config()
 
     def _load_provider_config(self, provider_id: str) -> bool:
@@ -266,12 +232,9 @@ class GeminiImagePlugin(Star):
         model = self.config.get("model", "gemini-2.0-flash-exp-image-generation")
         if model != "custom":
             return model
-
-        custom_model = self.config.get("custom_model", "").strip()
-        if custom_model:
+        if custom_model := self.config.get("custom_model", "").strip():
             logger.info(f"[Gemini Image] 使用自定义模型: {custom_model}")
             return custom_model
-
         logger.warning("[Gemini Image] 选择了 custom 但未配置 custom_model，将使用默认模型")
         return "gemini-2.0-flash-exp-image-generation"
 
@@ -296,72 +259,33 @@ class GeminiImagePlugin(Star):
 
     def _validate_config(self) -> None:
         """验证配置值的合理性"""
-        self.timeout = self._validate_numeric_config(
-            self.timeout, "超时时间", 0, 600, 120
-        )
+        self.timeout = self._validate_numeric_config(self.timeout, "超时时间", 0, 600, 120)
         self.cache_ttl = self._validate_numeric_config(
             self.cache_ttl, "缓存时间", 0, self.MAX_CACHE_TTL, self.DEFAULT_CACHE_TTL
         )
         self.max_cache_count = self._validate_numeric_config(
-            self.max_cache_count,
-            "最大缓存数量",
-            0,
-            self.MAX_CACHE_COUNT,
-            self.DEFAULT_MAX_CACHE_COUNT,
+            self.max_cache_count, "最大缓存数量", 0, self.MAX_CACHE_COUNT, self.DEFAULT_MAX_CACHE_COUNT
         )
 
         # 验证最大图片大小
-        max_image_size_mb = self.config.get(
-            "max_image_size_mb", self.DEFAULT_MAX_IMAGE_SIZE_MB
-        )
         max_image_size_mb = self._validate_numeric_config(
-            max_image_size_mb,
-            "最大图片大小",
-            0,
-            self.MAX_IMAGE_SIZE_MB,
-            self.DEFAULT_MAX_IMAGE_SIZE_MB,
+            self.config.get("max_image_size_mb", self.DEFAULT_MAX_IMAGE_SIZE_MB),
+            "最大图片大小", 0, self.MAX_IMAGE_SIZE_MB, self.DEFAULT_MAX_IMAGE_SIZE_MB
         )
-        self.max_image_size = max_image_size_mb * 1024 * 1024
+        self.max_image_size = int(max_image_size_mb * 1024 * 1024)
 
         # 验证并发生成数
-        max_concurrent = self.config.get(
-            "max_concurrent_generations", self.DEFAULT_MAX_CONCURRENT_GENERATIONS
-        )
         self.max_concurrent_generations = self._validate_numeric_config(
-            max_concurrent,
-            "并发生成数",
-            0,
-            self.MAX_CONCURRENT_GENERATIONS,
-            self.DEFAULT_MAX_CONCURRENT_GENERATIONS,
+            self.config.get("max_concurrent_generations", self.DEFAULT_MAX_CONCURRENT_GENERATIONS),
+            "并发生成数", 0, self.MAX_CONCURRENT_GENERATIONS, self.DEFAULT_MAX_CONCURRENT_GENERATIONS
         )
 
-        # 验证每分钟请求数
-        max_requests_per_minute = self.config.get("max_requests_per_minute", 5)
-        self._validate_numeric_config(max_requests_per_minute, "每分钟请求数", 0, 60, 5)
-        # 注意：这里只是验证，实际的请求限制需要额外的实现
-
-        # 验证默认宽高比
-        valid_aspect_ratios = [
-            "1:1",
-            "2:3",
-            "3:2",
-            "3:4",
-            "4:3",
-            "4:5",
-            "5:4",
-            "9:16",
-            "16:9",
-            "21:9",
-        ]
-        if self.default_aspect_ratio not in valid_aspect_ratios:
-            logger.warning(
-                f"[Gemini Image] 无效的默认宽高比: {self.default_aspect_ratio}，使用默认值 1:1"
-            )
+        # 验证默认宽高比和分辨率
+        if self.default_aspect_ratio not in ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"]:
+            logger.warning(f"[Gemini Image] 无效的默认宽高比: {self.default_aspect_ratio}，使用默认值 1:1")
             self.default_aspect_ratio = "1:1"
 
-        # 验证默认分辨率
-        valid_resolutions = ["1K", "2K", "4K"]
-        if self.default_resolution not in valid_resolutions:
+        if self.default_resolution not in ["1K", "2K", "4K"]:
             logger.warning(
                 f"[Gemini Image] 无效的默认分辨率: {self.default_resolution}，使用默认值 1K"
             )
@@ -370,53 +294,33 @@ class GeminiImagePlugin(Star):
     def _load_default_config(self):
         """加载默认配置"""
         api_key = self.config.get("api_key", "")
-        # 支持单个key或多个key
-        if isinstance(api_key, list):
-            self.api_keys = [k for k in api_key if k]
-        elif isinstance(api_key, str) and api_key:
-            self.api_keys = [api_key]
-        else:
-            self.api_keys = []
-
+        self.api_keys = (
+            [k for k in api_key if k] if isinstance(api_key, list)
+            else [api_key] if api_key else []
+        )
         self.base_url = self.config.get(
             "base_url", "https://generativelanguage.googleapis.com"
-        )
-        if self.base_url.endswith("/"):
-            self.base_url = self.base_url.rstrip("/")
+        ).rstrip("/")
 
     def _extract_provider_credentials(
         self, provider: object
     ) -> tuple[list[str], str | None]:
         """从 Provider 实例提取 API Keys 与 Base URL"""
         provider_config = getattr(provider, "provider_config", {}) or {}
-
-        # 提取 API Keys
         api_keys = self._extract_api_keys(provider_config)
-
-        # 提取 API Base URL
         api_base = (
             getattr(provider, "api_base", None)
             or provider_config.get("api_base")
             or provider_config.get("api_base_url")
         )
-        if isinstance(api_base, str):
-            api_base = api_base.rstrip("/")
-
-        return api_keys, api_base
+        return api_keys, api_base.rstrip("/") if isinstance(api_base, str) else api_base
 
     def _extract_api_keys(self, provider_config: dict) -> list[str]:
         """从提供商配置中提取 API Keys"""
-        # 尝试多种可能的 key 字段
         for key_field in ["key", "keys", "api_key", "access_token"]:
             keys = provider_config.get(key_field)
-            if not keys:
-                continue
-
-            if isinstance(keys, str) and keys:
-                return [keys]
-            elif isinstance(keys, list):
-                return [k for k in keys if k]
-
+            if keys:
+                return [keys] if isinstance(keys, str) else [k for k in keys if k]
         return []
 
     @filter.command("img")
@@ -456,20 +360,12 @@ class GeminiImagePlugin(Star):
         self, event: AstrMessageEvent
     ) -> tuple[bytes | None, str | None]:
         """获取参考图片（优先从消息中获取，失败则从缓存获取）"""
-        # 从消息链中查找图片
         for component in event.message_obj.message:
-            if isinstance(component, Comp.Image):
-                result = await self._download_image_from_component(component)
-                if result:
-                    return result
+            if isinstance(component, Comp.Image) and (result := await self._download_image(component.url or component.file)):
+                return result
 
-        # 如果消息中没有图片或下载失败，从缓存 URL 下载
         recent_images = self.get_recent_images(event.unified_msg_origin)
-        if recent_images:
-            first_image = recent_images[0]
-            return await self._download_image(first_image["url"])
-
-        return None, None
+        return await self._download_image(recent_images[0]["url"]) if recent_images else (None, None)
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
@@ -479,7 +375,7 @@ class GeminiImagePlugin(Star):
                 image_url = component.url or component.file
                 if image_url:
                     self._remember_user_image_url(
-                        event.unified_msg_origin, image_url, "image/jpeg"
+                        event.unified_msg_origin, image_url, "image/png"
                     )
 
     def get_recent_images(self, session_id: str) -> list[dict]:
@@ -497,37 +393,28 @@ class GeminiImagePlugin(Star):
             if sid not in self.recent_images:
                 continue
 
-            # 过滤未过期的图片
             valid_images = [
-                img
-                for img in self.recent_images[sid]
+                img for img in self.recent_images[sid]
                 if current_time - img["timestamp"] < self.image_cache_ttl
             ]
 
-            # 更新或删除会话
             if valid_images:
-                if len(valid_images) != len(self.recent_images[sid]):
-                    logger.debug(
-                        f"[Gemini Image] 清理会话 {sid} 的 {len(self.recent_images[sid]) - len(valid_images)} 张过期图片"
-                    )
-                    self.recent_images[sid] = valid_images
+                if len(valid_images) < len(self.recent_images[sid]):
+                    logger.debug(f"[Gemini Image] 清理会话 {sid} 的 {len(self.recent_images[sid]) - len(valid_images)} 张过期图片")
+                self.recent_images[sid] = valid_images
             else:
                 del self.recent_images[sid]
 
     def create_background_task(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task:
         """统一创建后台任务并追踪生命周期"""
-
         task = asyncio.create_task(coro)
         self.background_tasks.add(task)
         task.add_done_callback(self.background_tasks.discard)
         return task
 
-    async def _download_image_from_component(
-        self, component: Comp.Image
-    ) -> tuple[bytes, str] | None:
+    async def _download_image_from_component(self, component: Comp.Image) -> tuple[bytes, str] | None:
         """从消息组件下载图片"""
-        image_url = component.url or component.file
-        return await self._download_image(image_url)
+        return await self._download_image(component.url or component.file)
 
     async def _download_image(self, image_url: str | None) -> tuple[bytes, str] | None:
         """下载图片并返回数据与 MIME 类型"""
@@ -535,55 +422,39 @@ class GeminiImagePlugin(Star):
             return None
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(image_url) as resp:
-                    if resp.status != 200:
-                        logger.error(f"[Gemini Image] 下载图片失败: {resp.status} - {image_url}")
-                        return None
+            async with aiohttp.ClientSession() as session, session.get(image_url) as resp:
+                if resp.status != 200:
+                    logger.error(f"[Gemini Image] 下载图片失败: {resp.status} - {image_url}")
+                    return None
 
-                    image_data = await resp.read()
+                image_data = await resp.read()
+                if len(image_data) > self.max_image_size:
+                    logger.warning(f"[Gemini Image] 图片大小超过限制: {len(image_data)} > {self.max_image_size} bytes")
+                    return None
 
-                    # 验证图片大小
-                    if len(image_data) > self.max_image_size:
-                        logger.warning(
-                            f"[Gemini Image] 图片大小超过限制: {len(image_data)} > {self.max_image_size} bytes"
-                        )
-                        return None
-
-                    mime_type = resp.headers.get("Content-Type", "image/jpeg")
-                    logger.info(f"[Gemini Image] 下载图片成功: {len(image_data)} bytes")
-                    return image_data, mime_type
+                mime_type = resp.headers.get("Content-Type", "image/png")
+                logger.info(f"[Gemini Image] 下载图片成功: {len(image_data)} bytes, MIME: {mime_type}")
+                return image_data, mime_type
 
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             logger.error(f"[Gemini Image] 下载图片时出错: {exc}")
             return None
 
-    def _remember_user_image_url(
-        self, session_id: str, image_url: str, mime_type: str | None
-    ) -> None:
+    def _remember_user_image_url(self, session_id: str, image_url: str, mime_type: str | None) -> None:
         """缓存用户发送的图片 URL（而非完整数据，节省内存）"""
         session_images = self.recent_images.setdefault(session_id, [])
-        session_images.insert(
-            0,
-            {
-                "url": image_url,
-                "mime_type": mime_type or "image/jpeg",
-                "timestamp": time.time(),
-            },
-        )
+        session_images.insert(0, {
+            "url": image_url,
+            "mime_type": mime_type or "image/png",
+            "timestamp": time.time(),
+        })
 
-        # 限制缓存数量
         if len(session_images) > self.max_images_per_session:
-            del session_images[self.max_images_per_session :]
+            del session_images[self.max_images_per_session:]
 
-        logger.info(
-            f"[Gemini Image] 已缓存用户图片 URL，会话 {session_id} 当前有 {len(session_images)} 张图片"
-        )
+        logger.info(f"[Gemini Image] 已缓存用户图片 URL，会话 {session_id} 当前有 {len(session_images)} 张图片")
 
-        # 定期清理所有会话的过期图片（每10次缓存操作清理一次）
-        if not hasattr(self, "_cache_counter"):
-            self._cache_counter = 0
-        self._cache_counter += 1
+        self._cache_counter = getattr(self, "_cache_counter", 0) + 1
         if self._cache_counter >= 10:
             self._cache_counter = 0
             self._cleanup_expired_images()
@@ -601,11 +472,8 @@ class GeminiImagePlugin(Star):
         """异步生成图片并发送给用户"""
         async with self._generation_semaphore:
             try:
-                logger.info(
-                    f"[Gemini Image] 开始异步生成任务，会话: {unified_msg_origin}，提示词: {prompt[:50]}..."
-                )
+                logger.info(f"[Gemini Image] 开始异步生成任务，会话: {unified_msg_origin}，提示词: {prompt[:50]}...")
 
-                # 调用生成接口
                 result_data, error = await self.generator.generate_image(
                     prompt=prompt,
                     image_data=image_data,
@@ -618,15 +486,13 @@ class GeminiImagePlugin(Star):
                     await self._send_error_message(unified_msg_origin, error)
                     return
 
-                # 缓存并发送图片
                 image_id = hashlib.md5(f"{time.time()}".encode()).hexdigest()
                 file_path = await self.generator.cache_image(image_id, result_data)
                 await self.context.send_message(
                     unified_msg_origin, MessageChain().file_image(str(file_path))
                 )
 
-                mode = "图生图" if use_reference_image else "文生图"
-                logger.info(f"[Gemini Image] {mode}任务完成，已发送给用户")
+                logger.info(f"[Gemini Image] {'图生图' if use_reference_image else '文生图'}任务完成，已发送给用户")
 
             except Exception as e:
                 logger.error(f"[Gemini Image] 异步生成任务失败: {e}", exc_info=True)
@@ -639,46 +505,30 @@ class GeminiImagePlugin(Star):
         error_msg = f"❌ 图片生成失败: {error}\n\n💡 可能的原因:\n• 提示词描述过于复杂\n• API 服务暂时不可用\n• 请稍后重试"
         logger.error(f"[Gemini Image] {error_msg}")
         try:
-            await self.context.send_message(
-                unified_msg_origin, MessageChain().message(error_msg)
-            )
+            await self.context.send_message(unified_msg_origin, MessageChain().message(error_msg))
         except Exception:
             pass
 
     async def terminate(self):
         """插件卸载时清理资源"""
         try:
-            # 取消所有后台任务
-            if hasattr(self, "background_tasks"):
-                pending_count = len(self.background_tasks)
-                if pending_count > 0:
-                    logger.info(
-                        f"[Gemini Image] 正在取消 {pending_count} 个后台生成任务..."
-                    )
-                    for task in self.background_tasks:
-                        if not task.done():
-                            task.cancel()
-                    # 等待所有任务取消
-                    await asyncio.gather(*self.background_tasks, return_exceptions=True)
-                    logger.info("[Gemini Image] 所有后台任务已取消")
+            if hasattr(self, "background_tasks") and (pending_count := len(self.background_tasks)) > 0:
+                logger.info(f"[Gemini Image] 正在取消 {pending_count} 个后台生成任务...")
+                for task in self.background_tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*self.background_tasks, return_exceptions=True)
+                logger.info("[Gemini Image] 所有后台任务已取消")
 
-            # 清理图片缓存内存
             if hasattr(self, "recent_images"):
-                total_images = sum(
-                    len(images) for images in self.recent_images.values()
-                )
+                total_images = sum(len(images) for images in self.recent_images.values())
                 self.recent_images.clear()
-                logger.info(
-                    f"[Gemini Image] 已清理内存中的图片缓存 ({total_images} 张)"
-                )
+                logger.info(f"[Gemini Image] 已清理内存中的图片缓存 ({total_images} 张)")
 
-            # 清理生成器资源
-            if hasattr(self, "generator") and self.generator:
-                # 清理生成器的图片缓存
-                if hasattr(self.generator, "image_cache"):
-                    cache_count = len(self.generator.image_cache)
-                    self.generator.image_cache.clear()
-                    logger.info(f"[Gemini Image] 已清理生成器缓存 ({cache_count} 个)")
+            if hasattr(self, "generator") and self.generator and hasattr(self.generator, "image_cache"):
+                cache_count = len(self.generator.image_cache)
+                self.generator.image_cache.clear()
+                logger.info(f"[Gemini Image] 已清理生成器缓存 ({cache_count} 个)")
 
             logger.info("[Gemini Image] 插件已卸载")
         except Exception as e:
