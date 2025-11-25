@@ -47,7 +47,7 @@
     "description": "生图超时时间（秒）",
     "hint": "生成图片的最长等待时间，超时将返回错误",
     "type": "int",
-    "default": 120
+    "default": 300
   },
   "cache_ttl": {
     "description": "图片缓存时间（秒）",
@@ -59,7 +59,7 @@
     "description": "最大缓存数量",
     "hint": "本地最多缓存的图片数量，超出后删除最旧的",
     "type": "int",
-    "default": 100
+    "default": 50
   },
   "enable_llm_tool": {
     "description": "启用 LLM 工具",
@@ -106,7 +106,7 @@
     "description": "每分钟最大请求数",
     "hint": "单个用户每分钟最多可以发起的图片生成请求数",
     "type": "int",
-    "default": 5
+    "default": 3
   },
   "max_image_size_mb": {
     "description": "最大图片大小（MB）",

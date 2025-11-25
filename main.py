@@ -186,9 +186,9 @@ class GeminiImagePlugin(Star):
             self._load_default_config()
 
         self.model = self._load_model_config()
-        self.timeout = self.config.get("timeout", 120)
+        self.timeout = self.config.get("timeout", 300)
         self.cache_ttl = self.config.get("cache_ttl", 3600)
-        self.max_cache_count = self.config.get("max_cache_count", 100)
+        self.max_cache_count = self.config.get("max_cache_count", 50)
         self.enable_llm_tool = self.config.get("enable_llm_tool", True)
         self.default_aspect_ratio = self.config.get("default_aspect_ratio", "1:1")
         self.default_resolution = self.config.get("default_resolution", "1K")
