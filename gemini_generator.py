@@ -76,6 +76,9 @@ class GeminiImageGenerator:
         # 图片缓存字典 {image_id: ImageCache}
         self.image_cache: dict[str, ImageCache] = {}
 
+        # 复用的 aiohttp ClientSession
+        self._session: aiohttp.ClientSession | None = None
+
     def _get_current_api_key(self) -> str:
         """获取当前使用的 API Key"""
         if not self.api_keys:
@@ -90,16 +93,22 @@ class GeminiImageGenerator:
                 f"[Gemini Image] 切换到下一个 API Key (索引: {self.current_key_index})"
             )
 
-    def _convert_image_format(
+    def _get_session(self) -> aiohttp.ClientSession:
+        """获取或创建 aiohttp session"""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        return self._session
+
+    async def close_session(self):
+        """关闭 aiohttp session"""
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
+
+    def _sync_convert_image_format(
         self, image_data: bytes, mime_type: str
     ) -> tuple[bytes, str]:
-        """转换不支持的图片格式为 JPEG"""
-        supported_formats = ["image/jpeg", "image/png", "image/webp"]
-        if mime_type in supported_formats:
-            return image_data, mime_type
-
-        logger.info(f"[Gemini Image] 转换图片格式: {mime_type} -> image/jpeg")
-
+        """同步的图片格式转换逻辑（在线程池中执行）"""
         try:
             # 打开图片
             img = Image.open(BytesIO(image_data))
@@ -128,6 +137,19 @@ class GeminiImageGenerator:
             logger.error(f"[Gemini Image] 图片格式转换失败: {e}")
             return image_data, mime_type
 
+    async def _convert_image_format(
+        self, image_data: bytes, mime_type: str
+    ) -> tuple[bytes, str]:
+        """转换不支持的图片格式为 JPEG（异步，避免阻塞事件循环）"""
+        supported_formats = ["image/jpeg", "image/png", "image/webp"]
+        if mime_type in supported_formats:
+            return image_data, mime_type
+
+        logger.info(f"[Gemini Image] 转换图片格式: {mime_type} -> image/jpeg")
+
+        # 使用 asyncio.to_thread 在线程池中执行同步的图片转换操作
+        return await asyncio.to_thread(self._sync_convert_image_format, image_data, mime_type)
+
     async def generate_image(
         self,
         prompt: str,
@@ -155,7 +177,7 @@ class GeminiImageGenerator:
         converted_images = []
         if images_data:
             for image_data, mime_type in images_data:
-                converted_data, converted_mime = self._convert_image_format(image_data, mime_type)
+                converted_data, converted_mime = await self._convert_image_format(image_data, mime_type)
                 converted_images.append((converted_data, converted_mime))
 
         # 尝试所有可用的 API Key
@@ -196,20 +218,21 @@ class GeminiImageGenerator:
                 f"[Gemini Image] {prefix}开始{mode} (Key 索引: {self.current_key_index})"
             )
 
-            async with aiohttp.ClientSession() as session:
-                response_data = await self._make_api_request(session, payload, task_id)
-                if response_data is None:
-                    return None, "API 请求失败"
+            # 使用复用的 session
+            session = self._get_session()
+            response_data = await self._make_api_request(session, payload, task_id)
+            if response_data is None:
+                return None, "API 请求失败"
 
-                # 解析响应获取图片数据
-                result_image_data = self._extract_image_from_response(response_data, task_id)
-                if result_image_data:
-                    elapsed = time.time() - start_time
-                    logger.debug(f"[Gemini Image] {prefix}API 请求成功，耗时: {elapsed:.2f}s")
-                    return result_image_data, None
+            # 解析响应获取图片数据
+            result_image_data = self._extract_image_from_response(response_data, task_id)
+            if result_image_data:
+                elapsed = time.time() - start_time
+                logger.debug(f"[Gemini Image] {prefix}API 请求成功，耗时: {elapsed:.2f}s")
+                return result_image_data, None
 
-                logger.error(f"[Gemini Image] {prefix}响应中未找到图片数据")
-                return None, "响应中未找到图片数据"
+            logger.error(f"[Gemini Image] {prefix}响应中未找到图片数据")
+            return None, "响应中未找到图片数据"
 
         except asyncio.TimeoutError:
             elapsed = time.time() - start_time
@@ -315,10 +338,26 @@ class GeminiImageGenerator:
 
             if not candidates:
                 logger.warning(f"[Gemini Image] {prefix}响应中没有 candidates")
+                logger.debug(f"[Gemini Image] {prefix}完整响应: {response}")
                 return None
 
-            parts = candidates[0].get("content", {}).get("parts", [])
+            candidate = candidates[0]
+            logger.debug(f"[Gemini Image] {prefix}候选结果结构: {list(candidate.keys())}")
+
+            # 检查是否有 content 字段
+            if "content" not in candidate:
+                logger.warning(f"[Gemini Image] {prefix}候选结果中没有 content 字段")
+                logger.debug(f"[Gemini Image] {prefix}候选结果内容: {candidate}")
+                return None
+
+            content = candidate.get("content", {})
+            parts = content.get("parts", [])
             logger.debug(f"[Gemini Image] {prefix}找到 {len(parts)} 个 parts")
+
+            if not parts:
+                logger.warning(f"[Gemini Image] {prefix}content 中没有 parts")
+                logger.debug(f"[Gemini Image] {prefix}content 内容: {content}")
+                return None
 
             # 收集所有图片
             images = []
@@ -338,7 +377,7 @@ class GeminiImageGenerator:
             logger.error(f"[Gemini Image] {prefix}解析响应失败: {e}")
             return None
 
-    def _extract_image_from_part(self, part: dict, index: int, task_id: str | None = None) -> bytes | None:
+    def _extract_image_from_part(self, part: dict, index: int = 0, task_id: str | None = None) -> bytes | None:
         """从单个 part 中提取图片数据"""
         prefix = f"[{task_id}] " if task_id else ""
         inline_data = part.get("inline_data") or part.get("inlineData")

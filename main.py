@@ -84,11 +84,19 @@ class GeminiImageGenerationTool(FunctionTool[AstrAgentContext]):
         if not (prompt := kwargs.get("prompt", "")):
             return "请提供图片生成的提示词"
 
-        plugin = self.plugin or getattr(getattr(context, "context", None), "context", None)
+        # 优先使用注入的插件实例，否则从 context 中获取
+        plugin = self.plugin
+        if not plugin and hasattr(context, "context") and isinstance(context.context, AstrAgentContext):
+            plugin = context.context.context
+
         if not plugin:
             return "❌ 插件初始化失败，请联系管理员"
 
-        event = getattr(getattr(context, "context", None), "event", None)
+        # 从 AstrAgentContext 中获取 event
+        event = None
+        if hasattr(context, "context") and isinstance(context.context, AstrAgentContext):
+            event = context.context.event
+
         if not event:
             return "❌ 无法获取当前消息上下文"
 
@@ -162,6 +170,9 @@ class GeminiImagePlugin(Star):
 
         # 并发控制 - 使用验证后的值
         self._generation_semaphore = asyncio.Semaphore(self.max_concurrent_generations)
+
+        # 启动定时清理任务
+        self._cleanup_task = self.create_background_task(self._periodic_cleanup_images())
 
         # 注册工具到 LLM
         if self.enable_llm_tool:
@@ -419,6 +430,45 @@ class GeminiImagePlugin(Star):
             )
         )
 
+    def _get_reply_message_chain(self, reply_component: Comp.Reply) -> list | None:
+        """从 Reply 组件中获取被引用的消息链
+
+        Args:
+            reply_component: Reply 组件实例
+
+        Returns:
+            消息链列表，如果无法获取则返回 None
+        """
+        # 标准属性：chain
+        if hasattr(reply_component, "chain") and isinstance(reply_component.chain, list):
+            logger.debug("[Gemini Image] 使用标准属性 'chain' 获取引用消息")
+            return reply_component.chain
+
+        # 兼容性：尝试其他可能的属性名
+        for attr_name in ["message", "source.message_chain"]:
+            if "." in attr_name:
+                # 处理嵌套属性访问
+                parts = attr_name.split(".")
+                obj = reply_component
+                for part in parts:
+                    if not hasattr(obj, part):
+                        break
+                    obj = getattr(obj, part)
+                else:
+                    if isinstance(obj, list):
+                        logger.debug(f"[Gemini Image] 使用兼容属性 '{attr_name}' 获取引用消息")
+                        return obj
+            else:
+                # 简单属性访问
+                if hasattr(reply_component, attr_name):
+                    value = getattr(reply_component, attr_name)
+                    if isinstance(value, list):
+                        logger.debug(f"[Gemini Image] 使用兼容属性 '{attr_name}' 获取引用消息")
+                        return value
+
+        logger.warning("[Gemini Image] 无法从 Reply 组件中获取消息链")
+        return None
+
     async def _get_reference_images_for_tool(
         self, event: AstrMessageEvent, num_cached_images: int = 0
     ) -> list[tuple[bytes, str]]:
@@ -434,22 +484,13 @@ class GeminiImagePlugin(Star):
         images_data = []
         message_chain = event.message_obj.message
 
-        # 优先处理引用消息中的图片（避免对话中其他图片的干扰）
+        # 首先处理引用消息中的图片
         for component in message_chain:
             if isinstance(component, Comp.Reply):
                 logger.debug("[Gemini Image] 检测到引用消息，尝试解析被引用的图片")
 
-                source_chain = None
-                # 尝试从不同的属性中获取引用消息的内容
-                if hasattr(component, "chain") and isinstance(component.chain, list):
-                    source_chain = component.chain
-                    logger.debug("[Gemini Image] Reply 组件有 'chain' 属性")
-                elif hasattr(component, "message") and isinstance(component.message, list):
-                    source_chain = component.message
-                    logger.debug("[Gemini Image] Reply 组件有 'message' 属性")
-                elif hasattr(component, "source") and hasattr(component.source, "message_chain") and isinstance(component.source.message_chain, list):
-                    source_chain = component.source.message_chain
-                    logger.debug("[Gemini Image] Reply 组件有 'source.message_chain' 属性")
+                # 获取引用消息的消息链（标准属性是 chain）
+                source_chain = self._get_reply_message_chain(component)
 
                 # 从引用消息中提取所有图片
                 if source_chain:
@@ -459,18 +500,16 @@ class GeminiImagePlugin(Star):
                                 images_data.append(result)
                                 logger.debug("[Gemini Image] 成功从引用消息中加载图片")
 
-                # 如果找到了引用消息中的图片，直接返回，不再处理当前消息中的图片
-                if images_data:
-                    logger.info(f"[Gemini Image] 使用引用消息中的 {len(images_data)} 张图片作为参考")
-                    return images_data
+                # 找到 Reply 组件后就跳出循环，通常一个消息链只有一个 Reply
+                break
 
-        # 如果没有引用消息或引用消息中没有图片，则从当前消息中获取所有图片
+        # 继续处理当前消息中的图片
         for component in message_chain:
             if isinstance(component, Comp.Image):
                 if result := await self._download_image(component.url or component.file):
                     images_data.append(result)
 
-        # 如果当前消息中也没有图片，且指定了缓存数量，则从缓存获取指定数量的最新图片
+        # 如果消息中没有图片，且指定了缓存数量，则从缓存获取指定数量的最新图片
         if not images_data and num_cached_images > 0:
             recent_images = self.get_recent_images(event.unified_msg_origin)
             if recent_images:
@@ -480,6 +519,9 @@ class GeminiImagePlugin(Star):
                         images_data.append(result)
                 if images_data:
                     logger.debug(f"[Gemini Image] 从缓存中获取 {len(images_data)} 张参考图片")
+
+        if images_data:
+            logger.info(f"[Gemini Image] 共获取 {len(images_data)} 张参考图片")
 
         return images_data
 
@@ -499,6 +541,18 @@ class GeminiImagePlugin(Star):
         # 先清理过期图片
         self._cleanup_expired_images(session_id)
         return self.recent_images.get(session_id, [])
+
+    async def _periodic_cleanup_images(self):
+        """定时清理过期图片的后台任务"""
+        cleanup_interval = 600  # 每10分钟清理一次
+        try:
+            while True:
+                await asyncio.sleep(cleanup_interval)
+                self._cleanup_expired_images()
+                logger.debug("[Gemini Image] 定时清理任务已执行")
+        except asyncio.CancelledError:
+            logger.debug("[Gemini Image] 定时清理任务已取消")
+            raise
 
     def _cleanup_expired_images(self, session_id: str | None = None) -> None:
         """清理过期图片"""
@@ -528,14 +582,27 @@ class GeminiImagePlugin(Star):
         task.add_done_callback(self.background_tasks.discard)
         return task
 
+    def _get_download_session(self) -> aiohttp.ClientSession:
+        """获取或创建用于下载图片的 aiohttp session"""
+        if not hasattr(self, "_download_session") or self._download_session is None or self._download_session.closed:
+            timeout = aiohttp.ClientTimeout(total=30)
+            self._download_session = aiohttp.ClientSession(timeout=timeout)
+        return self._download_session
+
+    async def _close_download_session(self):
+        """关闭下载图片的 aiohttp session"""
+        if hasattr(self, "_download_session") and self._download_session and not self._download_session.closed:
+            await self._download_session.close()
+            self._download_session = None
+
     async def _download_image(self, image_url: str | None) -> tuple[bytes, str] | None:
         """下载图片并返回数据与 MIME 类型"""
         if not image_url:
             return None
 
         try:
-            timeout = aiohttp.ClientTimeout(total=30)
-            async with aiohttp.ClientSession(timeout=timeout) as session, session.get(image_url) as resp:
+            session = self._get_download_session()
+            async with session.get(image_url) as resp:
                 if resp.status != 200:
                     logger.error(f"[Gemini Image] 下载图片失败: {resp.status} - {image_url}")
                     return None
@@ -572,11 +639,6 @@ class GeminiImagePlugin(Star):
             del session_images[self.max_images_per_session:]
 
         logger.debug(f"[Gemini Image] 已缓存图片 URL，会话 {session_id} 当前有 {len(session_images)} 张图片")
-
-        self._cache_counter = getattr(self, "_cache_counter", 0) + 1
-        if self._cache_counter >= 10:
-            self._cache_counter = 0
-            self._cleanup_expired_images()
 
     async def _generate_and_send_image_async(
         self,
@@ -650,24 +712,50 @@ class GeminiImagePlugin(Star):
     async def terminate(self):
         """插件卸载时清理资源"""
         try:
+            logger.info("[Gemini Image] 开始卸载插件...")
+
+            # 1. 先关闭网络连接（避免任务取消时还在使用）
+            try:
+                await self._close_download_session()
+                logger.info("[Gemini Image] 已关闭下载 session")
+            except Exception as e:
+                logger.error(f"[Gemini Image] 关闭下载 session 失败: {e}")
+
+            try:
+                if hasattr(self, "generator") and self.generator:
+                    await self.generator.close_session()
+                    logger.info("[Gemini Image] 已关闭生成器 session")
+            except Exception as e:
+                logger.error(f"[Gemini Image] 关闭生成器 session 失败: {e}")
+
+            # 2. 取消所有后台任务（包括定时清理任务）
             if hasattr(self, "background_tasks") and (pending_count := len(self.background_tasks)) > 0:
-                logger.info(f"[Gemini Image] 正在取消 {pending_count} 个后台生成任务...")
+                logger.info(f"[Gemini Image] 正在取消 {pending_count} 个后台任务...")
                 for task in self.background_tasks:
                     if not task.done():
                         task.cancel()
                 await asyncio.gather(*self.background_tasks, return_exceptions=True)
                 logger.info("[Gemini Image] 所有后台任务已取消")
 
+            # 3. 清理内存缓存
             if hasattr(self, "recent_images"):
                 total_images = sum(len(images) for images in self.recent_images.values())
                 self.recent_images.clear()
                 logger.info(f"[Gemini Image] 已清理内存中的图片缓存 ({total_images} 张)")
 
+            # 4. 清理生成器缓存（包括磁盘文件）
             if hasattr(self, "generator") and self.generator and hasattr(self.generator, "image_cache"):
                 cache_count = len(self.generator.image_cache)
-                self.generator.image_cache.clear()
-                logger.info(f"[Gemini Image] 已清理生成器缓存 ({cache_count} 个)")
+                # 删除磁盘上的缓存文件
+                deleted_files = 0
+                for image_id in list(self.generator.image_cache.keys()):
+                    try:
+                        await self.generator._remove_cache(image_id)
+                        deleted_files += 1
+                    except Exception as e:
+                        logger.warning(f"[Gemini Image] 删除缓存文件失败: {e}")
+                logger.info(f"[Gemini Image] 已清理生成器缓存 ({cache_count} 个，删除 {deleted_files} 个文件)")
 
-            logger.info("[Gemini Image] 插件已卸载")
+            logger.info("[Gemini Image] 插件已成功卸载")
         except Exception as e:
-            logger.error(f"[Gemini Image] 清理资源时出错: {e}")
+            logger.error(f"[Gemini Image] 清理资源时出错: {e}", exc_info=True)
