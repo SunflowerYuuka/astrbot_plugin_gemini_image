@@ -154,6 +154,12 @@ class GeminiImagePlugin(Star):
         self.context = context
         self.config = config or AstrBotConfig()
 
+        # 获取系统配置中的唤醒前缀
+        system_config = self.context.get_config()
+        self.wake_prefixes = system_config.get("wake_prefix", ["/"])
+        if not isinstance(self.wake_prefixes, list):
+            self.wake_prefixes = [self.wake_prefixes]
+
         # 读取配置
         self._load_config()
 
@@ -388,14 +394,36 @@ class GeminiImagePlugin(Star):
         /生图 <提示词或预设名称> (引用包含图片的消息) - 图生图（支持多张图片）
         /生图 <提示词或预设名称> @用户 - 使用被@用户的头像作为参考图
         """
-        user_input = event.message_str.strip()
+        # 从消息链中提取纯文本（排除 At 组件）和被@的用户
+        text_parts = []
+        at_users = []
 
-        # 如果 message_str 包含指令名称，需要移除
-        # 某些情况下 message_str 可能是 "生图 浴室1" 而不是 "浴室1"
-        if user_input.startswith("生图 "):
-            user_input = user_input[3:].strip()  # 移除 "生图 " 前缀
-        elif user_input == "生图":
-            user_input = ""  # 只有指令名称，没有参数
+        for seg in event.get_messages():
+            if isinstance(seg, Comp.Plain):
+                text_parts.append(seg.text)
+            elif isinstance(seg, Comp.At):
+                at_users.append(str(seg.qq))
+
+        # 合并纯文本
+        user_input = "".join(text_parts).strip()
+
+        # 移除指令前缀（@filter.command 不会自动去除）
+        # 构建所有可能的前缀组合：wake_prefix + "生图"
+        possible_prefixes = []
+        for wake_prefix in self.wake_prefixes:
+            # 带空格和不带空格的版本
+            possible_prefixes.append(f"{wake_prefix}生图 ")
+            possible_prefixes.append(f"{wake_prefix}生图")
+        # 添加不带唤醒前缀的版本（某些情况下可能直接是 "生图"）
+        possible_prefixes.extend(["生图 ", "生图"])
+
+        # 按长度降序排序，优先匹配更长的前缀
+        possible_prefixes.sort(key=len, reverse=True)
+
+        for prefix in possible_prefixes:
+            if user_input.startswith(prefix):
+                user_input = user_input[len(prefix):].strip()
+                break
 
         if not user_input:
             # 构建帮助信息
@@ -418,29 +446,19 @@ class GeminiImagePlugin(Star):
             # 不是预设，直接使用用户输入作为提示词
             prompt = user_input
 
-        # 获取参考图片列表
-        images_data = await self._get_reference_images_for_tool(event, num_cached_images=3)
+        # 获取参考图片列表（指令生图不使用缓存，只从当前消息获取）
+        images_data = await self._get_reference_images_for_tool(event, num_cached_images=0)
 
-        # 检查消息中是否包含 @ 信息，获取被@用户的头像
-        self_id = str(event.get_sender_id())
-        target_id = next(
-            (
-                str(seg.qq)
-                for seg in event.get_messages()
-                if isinstance(seg, Comp.At) and str(seg.qq) != self_id
-            ),
-            None,
-        )
-
-        # 如果找到被@的用户，下载其头像作为参考图
-        if target_id:
-            logger.info(f"[Gemini Image] 检测到@用户 {target_id}，正在下载头像作为参考图")
-            avatar_data = await self.get_avatar(target_id)
-            if avatar_data:
-                images_data.append((avatar_data, "image/jpeg"))
-                logger.info(f"[Gemini Image] 成功添加用户 {target_id} 的头像作为参考图")
-            else:
-                logger.warning(f"[Gemini Image] 下载用户 {target_id} 的头像失败")
+        # 下载所有被@用户的头像作为参考图
+        if at_users:
+            logger.info(f"[Gemini Image] 检测到 {len(at_users)} 个@用户，正在下载头像作为参考图")
+            for target_id in at_users:
+                avatar_data = await self.get_avatar(target_id)
+                if avatar_data:
+                    images_data.append((avatar_data, "image/jpeg"))
+                    logger.info(f"[Gemini Image] 成功添加用户 {target_id} 的头像作为参考图")
+                else:
+                    logger.warning(f"[Gemini Image] 下载用户 {target_id} 的头像失败")
 
         mode = f"图生图({len(images_data)}张参考图)" if images_data else "文生图"
 
@@ -462,23 +480,15 @@ class GeminiImagePlugin(Star):
         )
 
     @filter.command("生图模型")
-    async def model_command(self, event: AstrMessageEvent):
+    async def model_command(self, event: AstrMessageEvent, model_index: str = ""):
         """生图模型管理指令
 
         用法:
         /生图模型 - 显示可用模型列表和当前使用的模型
         /生图模型 <序号> - 切换到指定序号的模型
         """
-        user_input = event.message_str.strip()
-
-        # 移除指令名称
-        if user_input.startswith("生图模型 "):
-            user_input = user_input[5:].strip()
-        elif user_input == "生图模型":
-            user_input = ""
-
         # 如果没有参数，显示模型列表
-        if not user_input:
+        if not model_index:
             model_list = "📋 可用模型列表:\n\n"
             for idx, model in enumerate(self.AVAILABLE_MODELS, 1):
                 current_marker = " ✓" if model == self.model else ""
@@ -492,9 +502,9 @@ class GeminiImagePlugin(Star):
 
         # 如果有参数，尝试切换模型
         try:
-            model_index = int(user_input) - 1
-            if 0 <= model_index < len(self.AVAILABLE_MODELS):
-                new_model = self.AVAILABLE_MODELS[model_index]
+            index = int(model_index) - 1
+            if 0 <= index < len(self.AVAILABLE_MODELS):
+                new_model = self.AVAILABLE_MODELS[index]
                 old_model = self.model
 
                 # 更新模型
@@ -521,13 +531,28 @@ class GeminiImagePlugin(Star):
         /预设 添加 <预设名:预设内容> - 添加新预设
         /预设 删除 <预设名> - 删除指定预设
         """
-        user_input = event.message_str.strip()
+        # 从消息链中提取纯文本
+        text_parts = []
+        for seg in event.get_messages():
+            if isinstance(seg, Comp.Plain):
+                text_parts.append(seg.text)
 
-        # 移除指令名称
-        if user_input.startswith("预设 "):
-            user_input = user_input[3:].strip()
-        elif user_input == "预设":
-            user_input = ""
+        user_input = "".join(text_parts).strip()
+
+        # 移除指令前缀
+        possible_prefixes = []
+        for wake_prefix in self.wake_prefixes:
+            possible_prefixes.append(f"{wake_prefix}预设 ")
+            possible_prefixes.append(f"{wake_prefix}预设")
+        possible_prefixes.extend(["预设 ", "预设"])
+
+        # 按长度降序排序，优先匹配更长的前缀
+        possible_prefixes.sort(key=len, reverse=True)
+
+        for prefix in possible_prefixes:
+            if user_input.startswith(prefix):
+                user_input = user_input[len(prefix):].strip()
+                break
 
         # 如果没有参数，显示预设列表
         if not user_input:
@@ -793,6 +818,34 @@ class GeminiImagePlugin(Star):
             return None
 
         try:
+            # 处理本地文件路径（file:// 协议）
+            if image_url.startswith("file://"):
+                file_path = image_url.removeprefix("file://")
+                try:
+                    # 使用 asyncio.to_thread 在线程池中读取文件，避免阻塞事件循环
+                    def read_file():
+                        with open(file_path, "rb") as f:
+                            return f.read()
+
+                    image_data = await asyncio.to_thread(read_file)
+
+                    if len(image_data) > self.max_image_size:
+                        logger.warning(f"[Gemini Image] 图片大小超过限制: {len(image_data)} > {self.max_image_size} bytes")
+                        return None
+
+                    # 根据文件扩展名推断 MIME 类型
+                    import mimetypes
+                    mime_type = mimetypes.guess_type(file_path)[0] or "image/png"
+                    logger.debug(f"[Gemini Image] 读取本地图片成功: {len(image_data)} bytes, MIME: {mime_type}")
+                    return image_data, mime_type
+                except FileNotFoundError:
+                    logger.warning(f"[Gemini Image] 本地图片文件不存在: {file_path}")
+                    return None
+                except Exception as e:
+                    logger.error(f"[Gemini Image] 读取本地图片失败: {e}")
+                    return None
+
+            # 处理 HTTP/HTTPS URL
             session = self._get_download_session()
             async with session.get(image_url) as resp:
                 if resp.status != 200:

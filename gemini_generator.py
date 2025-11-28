@@ -261,6 +261,7 @@ class GeminiImageGenerator:
         Returns:
             API 请求 payload
         """
+        # 只返回图片，不返回文本
         generation_config = {"responseModalities": ["IMAGE"]}
 
         # 添加图片配置
@@ -280,14 +281,20 @@ class GeminiImageGenerator:
 
         # 添加所有参考图片
         if images_data:
-            for image_data, mime_type in images_data:
+            for idx, (image_data, mime_type) in enumerate(images_data):
+                encoded_data = base64.b64encode(image_data).decode("utf-8")
                 parts.append(
                     {
                         "inline_data": {
                             "mime_type": mime_type,
-                            "data": base64.b64encode(image_data).decode("utf-8"),
+                            "data": encoded_data,
                         }
                     }
+                )
+                logger.debug(
+                    f"[Gemini Image] 添加参考图 {idx + 1}/{len(images_data)}: "
+                    f"大小={len(image_data)} bytes, MIME={mime_type}, "
+                    f"Base64长度={len(encoded_data)} chars"
                 )
 
         return {
