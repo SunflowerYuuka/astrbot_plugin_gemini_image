@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import time
 from collections.abc import Coroutine
 from typing import Any
@@ -92,8 +93,13 @@ class GeminiImageGenerationTool(FunctionTool[AstrAgentContext]):
             context.context, AstrAgentContext
         ):
             event = context.context.event
+        elif isinstance(context, dict):
+            event = context.get("event")
 
         if not event:
+            logger.warning(
+                f"[Gemini Image] Tool call context missing event. Context type: {type(context)}"
+            )
             return "❌ 无法获取当前消息上下文"
 
         if not plugin.generator.api_keys:
@@ -102,13 +108,27 @@ class GeminiImageGenerationTool(FunctionTool[AstrAgentContext]):
         # 获取参考图片
         images_data = await plugin._get_reference_images_for_tool(event)
 
+        # 生成任务 ID
+        task_id = hashlib.md5(
+            f"{time.time()}{event.unified_msg_origin}".encode()
+        ).hexdigest()[:8]
+
+        # 记录任务摘要
+        res = kwargs.get("resolution", "1K")
+        ar = kwargs.get("aspect_ratio", "1:1")
+        img_count = len(images_data) if images_data else 0
+        logger.info(
+            f"[Gemini Image] 任务摘要 [{task_id}] - 提示词: {prompt} | 预设: 无 | 参考图: {img_count}张 | 分辨率: {res} | 比例: {ar}"
+        )
+
         plugin.create_background_task(
             plugin._generate_and_send_image_async(
                 prompt=prompt,
                 images_data=images_data or None,
                 unified_msg_origin=event.unified_msg_origin,
-                aspect_ratio=kwargs.get("aspect_ratio", "1:1"),
-                resolution=kwargs.get("resolution", "1K"),
+                aspect_ratio=ar,
+                resolution=res,
+                task_id=task_id,
             )
         )
 
@@ -152,7 +172,7 @@ class GeminiImagePlugin(Star):
 
         self.background_tasks: set[asyncio.Task] = set()
         self._generation_semaphore = asyncio.Semaphore(self.max_concurrent_generations)
-        
+
         # 频率限制 {user_id: [timestamp, ...]}
         self.user_request_timestamps: dict[str, list[float]] = {}
 
@@ -188,7 +208,7 @@ class GeminiImagePlugin(Star):
         self.presets = self._load_presets()
         self.proxy = self.config.get("proxy", "") or None
         self.safety_settings = self.config.get("safety_settings", "BLOCK_NONE")
-        
+
         # 限制配置
         self.max_image_size_mb = self.config.get("max_image_size_mb", 10)
         self.max_requests_per_minute = self.config.get("max_requests_per_minute", 3)
@@ -283,14 +303,14 @@ class GeminiImagePlugin(Star):
         """检查用户请求频率是否超限"""
         now = time.time()
         timestamps = self.user_request_timestamps.setdefault(user_id, [])
-        
+
         # 移除一分钟前的记录
         valid_timestamps = [t for t in timestamps if now - t < 60]
         self.user_request_timestamps[user_id] = valid_timestamps
-        
+
         if len(valid_timestamps) >= self.max_requests_per_minute:
             return False
-            
+
         valid_timestamps.append(now)
         return True
 
@@ -298,9 +318,11 @@ class GeminiImagePlugin(Star):
     async def generate_image_command(self, event: AstrMessageEvent):
         """生成图片指令"""
         user_id = event.unified_msg_origin
-        
+
         if not self._check_rate_limit(user_id):
-            yield event.plain_result(f"❌ 请求过于频繁，请稍后再试 (每分钟限 {self.max_requests_per_minute} 次)")
+            yield event.plain_result(
+                f"❌ 请求过于频繁，请稍后再试 (每分钟限 {self.max_requests_per_minute} 次)"
+            )
             return
 
         masked_uid = (
@@ -328,14 +350,25 @@ class GeminiImagePlugin(Star):
 
         # 检查是否使用了预设
         matched_preset = None
-        if prompt in self.presets:
-            matched_preset = prompt
-        else:
-            # 尝试不区分大小写匹配
-            for name in self.presets:
-                if name.lower() == prompt.lower():
-                    matched_preset = name
-                    break
+        extra_content = ""
+
+        if prompt:
+            # 分割第一部分作为潜在的预设名称
+            parts = prompt.split(maxsplit=1)
+            first_token = parts[0]
+            rest_token = parts[1] if len(parts) > 1 else ""
+
+            # 检查是否匹配预设
+            if first_token in self.presets:
+                matched_preset = first_token
+                extra_content = rest_token
+            else:
+                # 大小写不敏感匹配
+                for name in self.presets:
+                    if name.lower() == first_token.lower():
+                        matched_preset = name
+                        extra_content = rest_token
+                        break
 
         if matched_preset:
             logger.info(f"[Gemini Image] 命中预设: {matched_preset}")
@@ -355,6 +388,10 @@ class GeminiImagePlugin(Star):
                     prompt = preset_content
             except json.JSONDecodeError:
                 prompt = preset_content
+
+            # 如果有额外内容，追加到提示词后
+            if extra_content:
+                prompt = f"{prompt} {extra_content}"
 
         if not prompt:
             yield event.plain_result("❌ 请提供图片生成的提示词或预设名称！")
@@ -376,6 +413,16 @@ class GeminiImagePlugin(Star):
 
         yield event.plain_result(msg)
 
+        # 生成任务 ID
+        task_id = hashlib.md5(f"{time.time()}{user_id}".encode()).hexdigest()[:8]
+
+        # 记录任务摘要
+        preset_name = matched_preset if matched_preset else "无"
+        img_count = len(images_data) if images_data else 0
+        logger.info(
+            f"[Gemini Image] 任务摘要 [{task_id}] - 提示词: {prompt} | 预设: {preset_name} | 参考图: {img_count}张 | 分辨率: {resolution} | 比例: {aspect_ratio}"
+        )
+
         # 创建后台任务
         self.create_background_task(
             self._generate_and_send_image_async(
@@ -384,6 +431,7 @@ class GeminiImagePlugin(Star):
                 unified_msg_origin=event.unified_msg_origin,
                 aspect_ratio=aspect_ratio,
                 resolution=resolution,
+                task_id=task_id,
             )
         )
 
@@ -395,6 +443,23 @@ class GeminiImagePlugin(Star):
 
         if not event.message_obj.message:
             return images_data
+
+        logger.debug(
+            f"[Gemini Image] Searching images from event components: {event.message_obj.message}"
+        )
+
+        # 0. 预扫描：获取回复发送者ID和统计At次数
+        reply_sender_id = None
+        at_counts = {}
+
+        for component in event.message_obj.message:
+            if isinstance(component, Comp.Reply):
+                if hasattr(component, "sender_id") and component.sender_id:
+                    reply_sender_id = str(component.sender_id)
+            elif isinstance(component, Comp.At):
+                if component.qq != "all":
+                    uid = str(component.qq)
+                    at_counts[uid] = at_counts.get(uid, 0) + 1
 
         # 遍历消息组件
         for component in event.message_obj.message:
@@ -416,7 +481,19 @@ class GeminiImagePlugin(Star):
             # 3. 处理 At 用户（获取头像）
             elif isinstance(component, Comp.At):
                 if component.qq != "all":  # 忽略 @全体成员
-                    if avatar_data := await self.get_avatar(str(component.qq)):
+                    uid = str(component.qq)
+
+                    # 核心逻辑：判断是否是引用消息带来的自动 @
+                    if reply_sender_id and uid == reply_sender_id:
+                        # 如果该 ID 只出现了一次 At，且是引用消息的发送者，则认为是自动 @，忽略头像
+                        if at_counts.get(uid, 0) == 1:
+                            logger.debug(
+                                f"[Gemini Image] Ignoring auto-At for reply sender {uid}"
+                            )
+                            continue
+                        # 如果出现多次，说明用户显式 @ 了（除了自动 @ 之外），保留
+
+                    if avatar_data := await self.get_avatar(uid):
                         images_data.append((avatar_data, "image/jpeg"))
 
         return images_data
@@ -540,28 +617,39 @@ class GeminiImagePlugin(Star):
     async def _download_image(self, url: str) -> tuple[bytes, str] | None:
         """下载图片并返回数据与 MIME 类型 (Helper wrapper around core utility)"""
         try:
-            path = await download_image_by_url(url)
-            if path:
-                with open(path, "rb") as f:
+            data = None
+            # 尝试作为本地文件读取
+            if os.path.exists(url) and os.path.isfile(url):
+                with open(url, "rb") as f:
                     data = f.read()
-                
-                # 检查大小
-                if len(data) > self.max_image_size_mb * 1024 * 1024:
-                    logger.warning(f"[Gemini Image] 图片超过大小限制 ({self.max_image_size_mb}MB)")
-                    return None
+            else:
+                path = await download_image_by_url(url)
+                if path:
+                    with open(path, "rb") as f:
+                        data = f.read()
 
-                # 简单推断 mime
-                mime = "image/png"
-                if data.startswith(b"\xff\xd8"):
-                    mime = "image/jpeg"
-                elif data.startswith(b"GIF"):
-                    mime = "image/gif"
-                elif data.startswith(b"RIFF") and b"WEBP" in data[:16]:
-                    mime = "image/webp"
+            if not data:
+                return None
 
-                return data, mime
+            # 检查大小
+            if len(data) > self.max_image_size_mb * 1024 * 1024:
+                logger.warning(
+                    f"[Gemini Image] 图片超过大小限制 ({self.max_image_size_mb}MB)"
+                )
+                return None
+
+            # 简单推断 mime
+            mime = "image/png"
+            if data.startswith(b"\xff\xd8"):
+                mime = "image/jpeg"
+            elif data.startswith(b"GIF"):
+                mime = "image/gif"
+            elif data.startswith(b"RIFF") and b"WEBP" in data[:16]:
+                mime = "image/webp"
+
+            return data, mime
         except Exception as e:
-            logger.error(f"[Gemini Image] 下载图片失败: {e}")
+            logger.error(f"[Gemini Image] 获取图片失败 (URL/Path: {url}): {e}")
         return None
 
     async def _generate_and_send_image_async(
@@ -571,13 +659,13 @@ class GeminiImagePlugin(Star):
         images_data: list[tuple[bytes, str]] | None = None,
         aspect_ratio: str = "1:1",
         resolution: str = "1K",
+        task_id: str | None = None,
     ):
         """异步生成图片并发送"""
-        task_id = hashlib.md5(
-            f"{time.time()}{unified_msg_origin}".encode()
-        ).hexdigest()[:8]
-
-        logger.info(f"[Gemini Image] 开始生成任务 [{task_id}] - Prompt: {prompt}")
+        if not task_id:
+            task_id = hashlib.md5(
+                f"{time.time()}{unified_msg_origin}".encode()
+            ).hexdigest()[:8]
 
         async with self._generation_semaphore:
             try:
