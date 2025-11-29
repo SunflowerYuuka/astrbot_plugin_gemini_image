@@ -251,6 +251,7 @@ class GeminiImageGenerator:
                 "HARM_CATEGORY_HATE_SPEECH",
                 "HARM_CATEGORY_SEXUALLY_EXPLICIT",
                 "HARM_CATEGORY_DANGEROUS_CONTENT",
+                "HARM_CATEGORY_CIVIC_INTEGRITY",
             ]:
                 safety_settings.append(
                     {"category": category, "threshold": self.safety_settings}

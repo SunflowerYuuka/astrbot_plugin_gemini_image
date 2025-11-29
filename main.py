@@ -34,7 +34,7 @@ class GeminiImageGenerationTool(FunctionTool[AstrAgentContext]):
     """统一的图像生成工具，支持文生图和图生图"""
 
     name: str = "gemini_generate_image"
-    description: str = "使用 Gemini 模型生成图片"
+    description: str = "使用 Gemini 模型生成或修改图片"
     parameters: dict = Field(
         default_factory=lambda: {
             "type": "object",
@@ -75,7 +75,7 @@ class GeminiImageGenerationTool(FunctionTool[AstrAgentContext]):
         """动态更新 description 以包含当前模型信息"""
         if self.plugin and hasattr(self.plugin, "model"):
             self.description = (
-                f"使用 Gemini 模型生成图片。当前模型: {self.plugin.model}"
+                f"使用 Gemini 模型生成或修改图片。当前模型: {self.plugin.model}"
             )
 
     async def call(
@@ -496,7 +496,7 @@ class GeminiImagePlugin(Star):
                     # 核心逻辑2：判断是否是触发机器人的 At
                     # 如果 Bot 被 At 了正好一次，通常是作为指令触发前缀，忽略头像
                     # 如果 Bot 被 At 了多次，说明用户显式引用了 Bot 头像
-                    self_id = str(getattr(event, "self_id", ""))
+                    self_id = str(event.get_self_id()).strip()
                     if self_id and uid == self_id:
                         if at_counts.get(uid, 0) == 1:
                             logger.debug(
