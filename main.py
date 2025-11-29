@@ -493,6 +493,17 @@ class GeminiImagePlugin(Star):
                             continue
                         # 如果出现多次，说明用户显式 @ 了（除了自动 @ 之外），保留
 
+                    # 核心逻辑2：判断是否是触发机器人的 At
+                    # 如果 Bot 被 At 了正好一次，通常是作为指令触发前缀，忽略头像
+                    # 如果 Bot 被 At 了多次，说明用户显式引用了 Bot 头像
+                    self_id = str(getattr(event, "self_id", ""))
+                    if self_id and uid == self_id:
+                        if at_counts.get(uid, 0) == 1:
+                            logger.debug(
+                                f"[Gemini Image] Ignoring bot trigger At {uid}"
+                            )
+                            continue
+
                     if avatar_data := await self.get_avatar(uid):
                         images_data.append((avatar_data, "image/jpeg"))
 
