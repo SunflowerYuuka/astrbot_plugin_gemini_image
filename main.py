@@ -45,7 +45,7 @@ class GeminiImageGenerationTool(FunctionTool[AstrAgentContext]):
                 },
                 "aspect_ratio": {
                     "type": "string",
-                    "description": "图片宽高比",
+                    "description": "图片宽高比 (默认使用插件配置)",
                     "enum": [
                         "1:1",
                         "2:3",
@@ -57,11 +57,12 @@ class GeminiImageGenerationTool(FunctionTool[AstrAgentContext]):
                         "9:16",
                         "16:9",
                         "21:9",
+                        "自动",
                     ],
                 },
                 "resolution": {
                     "type": "string",
-                    "description": "图片分辨率，仅 gemini-3-pro-image-preview 模型支持",
+                    "description": "图片分辨率，仅 gemini-3-pro-image-preview 模型支持 (默认使用插件配置)",
                     "enum": ["1K", "2K", "4K"],
                 },
             },
@@ -114,8 +115,8 @@ class GeminiImageGenerationTool(FunctionTool[AstrAgentContext]):
         ).hexdigest()[:8]
 
         # 记录任务摘要
-        res = kwargs.get("resolution", "1K")
-        ar = kwargs.get("aspect_ratio", "1:1")
+        res = kwargs.get("resolution", plugin.default_resolution)
+        ar = kwargs.get("aspect_ratio", plugin.default_aspect_ratio)
         img_count = len(images_data) if images_data else 0
         logger.info(
             f"[Gemini Image] 任务摘要 [{task_id}] - 提示词: {prompt} | 预设: 无 | 参考图: {img_count}张 | 分辨率: {res} | 比例: {ar}"
