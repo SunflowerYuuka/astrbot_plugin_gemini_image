@@ -62,7 +62,7 @@ class GeminiImageGenerationTool(FunctionTool[AstrAgentContext]):
                 },
                 "resolution": {
                     "type": "string",
-                    "description": "图片分辨率，仅 gemini-3-pro-image-preview 模型支持 (默认使用插件配置)",
+                    "description": "图片分辨率，仅 gemini-3-pro-image-preview 模型支持",
                     "enum": ["1K", "2K", "4K"],
                 },
             },
