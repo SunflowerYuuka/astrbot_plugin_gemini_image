@@ -144,7 +144,7 @@ class GeminiImageGenerator:
         self,
         prompt: str,
         images_data: list[tuple[bytes, str]] | None = None,
-        aspect_ratio: str = "1:1",
+        aspect_ratio: str | None = "1:1",
         image_size: str | None = None,
         task_id: str | None = None,
     ) -> tuple[list[bytes] | None, str | None]:
@@ -199,7 +199,7 @@ class GeminiImageGenerator:
         self,
         prompt: str,
         images_data: list[tuple[bytes, str]],
-        aspect_ratio: str,
+        aspect_ratio: str | None,
         image_size: str | None,
         task_id: str | None = None,
     ) -> tuple[list[bytes] | None, str | None]:
@@ -219,7 +219,7 @@ class GeminiImageGenerator:
         self,
         prompt: str,
         images_data: list[tuple[bytes, str]],
-        aspect_ratio: str,
+        aspect_ratio: str | None,
         image_size: str | None,
         task_id: str | None = None,
     ) -> tuple[list[bytes] | None, str | None]:
@@ -263,7 +263,7 @@ class GeminiImageGenerator:
         self,
         prompt: str,
         images_data: list[tuple[bytes, str]] | None,
-        aspect_ratio: str,
+        aspect_ratio: str | None,
         image_size: str | None,
     ) -> dict:
         """构建 OpenAI Chat Completions 请求负载"""
@@ -288,6 +288,7 @@ class GeminiImageGenerator:
 
         # image_config
         image_config = {}
+        generation_config = {}
 
         if aspect_ratio:
             image_config["aspectRatio"] = aspect_ratio
@@ -296,7 +297,11 @@ class GeminiImageGenerator:
             image_config["imageSize"] = image_size
 
         if image_config:
-            payload["imageConfig"] = image_config
+            generation_config["imageConfig"] = image_config
+
+        payload["generationConfig"] = generation_config
+
+        logger.debug(f"[Gemini Image] OpenAI Chat Payload: {payload}")
 
         return payload
 
@@ -464,7 +469,7 @@ class GeminiImageGenerator:
         self,
         prompt: str,
         images_data: list[tuple[bytes, str]],
-        aspect_ratio: str,
+        aspect_ratio: str | None,
         image_size: str | None,
         task_id: str | None = None,
     ) -> tuple[list[bytes] | None, str | None]:
@@ -497,7 +502,7 @@ class GeminiImageGenerator:
         self,
         prompt: str,
         images_data: list[tuple[bytes, str]],
-        aspect_ratio: str,
+        aspect_ratio: str | None,
         image_size: str | None,
     ) -> dict:
         generation_config = {"responseModalities": ["IMAGE"]}

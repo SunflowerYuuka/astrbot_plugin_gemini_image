@@ -114,8 +114,8 @@ class GeminiImageGenerationTool(FunctionTool[AstrAgentContext]):
         ).hexdigest()[:8]
 
         # 记录任务摘要
-        res = kwargs.get("resolution", "1K")
-        ar = kwargs.get("aspect_ratio", "1:1")
+        res = kwargs.get("resolution", plugin.default_resolution)
+        ar = kwargs.get("aspect_ratio", plugin.default_aspect_ratio)
         img_count = len(images_data) if images_data else 0
         logger.info(
             f"[Gemini Image] 任务摘要 [{task_id}] - 提示词: {prompt} | 预设: 无 | 参考图: {img_count}张 | 分辨率: {res} | 比例: {ar}"
@@ -686,12 +686,17 @@ class GeminiImagePlugin(Star):
                 f"{time.time()}{unified_msg_origin}".encode()
             ).hexdigest()[:8]
 
+        # 处理 "自动" 比例
+        final_ar = aspect_ratio
+        if aspect_ratio == "自动":
+            final_ar = None
+
         async with self._generation_semaphore:
             try:
                 results, error = await self.generator.generate_image(
                     prompt=prompt,
                     images_data=images_data,
-                    aspect_ratio=aspect_ratio,
+                    aspect_ratio=final_ar,
                     image_size=resolution,
                     task_id=task_id,
                 )
