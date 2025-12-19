@@ -5,6 +5,12 @@
     "type": "bool",
     "default": true
   },
+  "enable_avatar_tool": {
+    "description": "启用获取用户头像工具",
+    "hint": "启用后,LLM 可以在自然语言调用时获取用户头像用于文生图",
+    "type": "bool",
+    "default": false
+  },
   "use_system_provider": {
     "description": "使用系统已有的提供商",
     "hint": "启用后从下方选择器中选择提供商,关闭后需手动配置 API Key 和 Base URL",

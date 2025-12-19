@@ -423,8 +423,8 @@ class GeminiImageGenerator:
             # 1. 检查 message.content 为字符串的情况 (Markdown 图片 / Data URI)
             if isinstance(content, str):
                 # 匹配 markdown 图片语法 ![...](url)
-                matches = re.findall(r"!\[.*?\]\((.*?)\)", content)
-                for url in matches:
+                markdown_matches = re.findall(r"!\[.*?\]\((.*?)\)", content)
+                for url in markdown_matches:
                     if url.startswith("http"):
                         img_data = await self._download_image_from_url(url)
                         if img_data:
@@ -434,12 +434,14 @@ class GeminiImageGenerator:
                         if img_data:
                             images.append(img_data)
 
-                # 匹配纯文本中的 Data URI
+                # 匹配纯文本中的 Data URI（排除 markdown 语法中已匹配的部分）
+                # 先移除 markdown 图片语法，避免重复解析
+                content_without_markdown = re.sub(r"!\[.*?\]\(.*?\)", "", content)
                 pattern = re.compile(
                     r"data\s*:\s*image/([a-zA-Z0-9.+-]+)\s*;\s*base64\s*,\s*([-A-Za-z0-9+/=_\s]+)",
                     flags=re.IGNORECASE,
                 )
-                data_uri_matches = pattern.findall(content)
+                data_uri_matches = pattern.findall(content_without_markdown)
                 for _, b64_str in data_uri_matches:
                     try:
                         images.append(base64.b64decode(b64_str))
