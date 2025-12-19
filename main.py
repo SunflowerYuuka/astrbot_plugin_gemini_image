@@ -64,19 +64,17 @@ class GeminiImageGenerationTool(FunctionTool[AstrAgentContext]):
                     "description": "图片分辨率，仅 gemini-3-pro-image-preview(nano banana pro) 模型支持",
                     "enum": ["1K", "2K", "4K"],
                 },
+                "avatar_references": {
+                    "type": "array",
+                    "description": "需要作为参考的用户头像列表。支持: 'self'(机器人头像)、'sender'(发送者头像)、或具体的QQ号",
+                    "items": {"type": "string"},
+                },
             },
             "required": ["prompt"],
         }
     )
 
     plugin: object | None = None
-
-    def __post_init__(self):
-        """动态更新 description 以包含当前模型信息"""
-        if self.plugin and hasattr(self.plugin, "model"):
-            self.description = (
-                f"使用 Gemini 模型生成或修改图片。当前模型: {self.plugin.model}"
-            )
 
     async def call(
         self, context: ContextWrapper[AstrAgentContext], **kwargs
@@ -108,6 +106,34 @@ class GeminiImageGenerationTool(FunctionTool[AstrAgentContext]):
         # 获取参考图片
         images_data = await plugin._get_reference_images_for_tool(event)
 
+        # 处理头像引用参数
+        avatar_references = kwargs.get("avatar_references", [])
+        if avatar_references and isinstance(avatar_references, list):
+            for ref in avatar_references:
+                if not isinstance(ref, str):
+                    continue
+
+                ref = ref.strip().lower()
+                user_id = None
+
+                if ref == "self":
+                    # 获取机器人自己的头像
+                    user_id = str(event.get_self_id())
+                elif ref == "sender":
+                    # 获取发送者的头像
+                    user_id = str(event.get_sender_id() or event.unified_msg_origin)
+                else:
+                    # 作为QQ号处理
+                    user_id = ref
+
+                if user_id:
+                    avatar_data = await plugin.get_avatar(user_id)
+                    if avatar_data:
+                        images_data.append((avatar_data, "image/jpeg"))
+                        logger.info(f"[Gemini Image] 已添加用户 {user_id} 的头像作为参考图片")
+                    else:
+                        logger.warning(f"[Gemini Image] 无法获取用户 {user_id} 的头像")
+
         # 生成任务 ID
         task_id = hashlib.md5(
             f"{time.time()}{event.unified_msg_origin}".encode()
@@ -134,73 +160,6 @@ class GeminiImageGenerationTool(FunctionTool[AstrAgentContext]):
 
         mode = "图生图" if images_data else "文生图"
         return f"已启动{mode}任务"
-
-
-@pydantic_dataclass
-class GetUserAvatarTool(FunctionTool[AstrAgentContext]):
-    """获取用户头像工具，用于在自然语言调用时获取头像进行图像生成"""
-
-    name: str = "get_user_avatar"
-    description: str = "获取指定用户的QQ头像，用于后续的图像生成。获取后的头像会自动作为参考图片用于下一次图像生成"
-    parameters: dict = Field(
-        default_factory=lambda: {
-            "type": "object",
-            "properties": {
-                "user_id": {
-                    "type": "string",
-                    "description": "用户的QQ号，如果不指定则获取当前发送消息的用户头像",
-                },
-            },
-            "required": [],
-        }
-    )
-
-    plugin: object | None = None
-
-    async def call(
-        self, context: ContextWrapper[AstrAgentContext], **kwargs
-    ) -> ToolExecResult:
-        plugin = self.plugin
-        if not plugin:
-            return "❌ 插件未正确初始化 (Plugin instance missing)"
-
-        event = None
-        if hasattr(context, "context") and isinstance(
-            context.context, AstrAgentContext
-        ):
-            event = context.context.event
-        elif isinstance(context, dict):
-            event = context.get("event")
-
-        if not event:
-            logger.warning(
-                f"[Gemini Image] Avatar tool call context missing event. Context type: {type(context)}"
-            )
-            return "❌ 无法获取当前消息上下文"
-
-        # 获取用户ID
-        user_id = kwargs.get("user_id", "")
-        if not user_id:
-            # 如果没有指定用户ID，使用当前用户的ID
-            user_id = str(event.sender_id or event.unified_msg_origin)
-
-        logger.info(f"[Gemini Image] 获取用户头像: {user_id}")
-
-        # 下载头像
-        avatar_data = await plugin.get_avatar(user_id)
-        if not avatar_data:
-            return f"❌ 无法获取用户 {user_id} 的头像"
-
-        # 将头像添加到额外的参考图片中
-        origin = event.unified_msg_origin
-        if origin not in plugin.extra_reference_images:
-            plugin.extra_reference_images[origin] = []
-        plugin.extra_reference_images[origin].append((avatar_data, "image/jpeg"))
-
-        logger.info(
-            f"[Gemini Image] 已获取用户 {user_id} 的头像，添加到参考图片列表"
-        )
-        return "✅ 已获取用户头像，将在下一次图像生成时自动使用"
 
 
 class GeminiImagePlugin(Star):
@@ -244,17 +203,10 @@ class GeminiImagePlugin(Star):
         # 频率限制 {user_id: [timestamp, ...]}
         self.user_request_timestamps: dict[str, list[float]] = {}
 
-        # 额外的参考图片 {unified_msg_origin: [(image_data, mime_type), ...]}
-        self.extra_reference_images: dict[str, list[tuple[bytes, str]]] = {}
-
         # 注册工具到 LLM
         if self.enable_llm_tool:
             self.context.add_llm_tools(GeminiImageGenerationTool(plugin=self))
-            logger.info("[Gemini Image] 已注册统一的图像生成工具")
-
-        if self.enable_avatar_tool:
-            self.context.add_llm_tools(GetUserAvatarTool(plugin=self))
-            logger.info("[Gemini Image] 已注册获取用户头像工具")
+            logger.info("[Gemini Image] 已注册图像生成工具（支持头像引用）")
 
         logger.info(f"[Gemini Image] 插件已加载，使用模型: {self.model}")
 
@@ -278,7 +230,6 @@ class GeminiImagePlugin(Star):
         self.model = self._load_model_config()
         self.timeout = self.config.get("timeout", 300)
         self.enable_llm_tool = self.config.get("enable_llm_tool", True)
-        self.enable_avatar_tool = self.config.get("enable_avatar_tool", False)
         self.default_aspect_ratio = self.config.get("default_aspect_ratio", "1:1")
         self.default_resolution = self.config.get("default_resolution", "1K")
         self.max_retry_attempts = self.config.get("max_retry_attempts", 3)
@@ -682,20 +633,8 @@ class GeminiImagePlugin(Star):
         self, event: AstrMessageEvent
     ) -> list[tuple[bytes, str]]:
         """获取参考图片列表（用于工具调用）"""
-        # 1. 从事件中获取（包含当前图片、引用图片、At头像）
+        # 从事件中获取（包含当前图片、引用图片、At头像）
         images_data = await self._fetch_images_from_event(event)
-
-        # 2. 从额外的参考图片中获取（例如通过 get_user_avatar 工具获取的头像）
-        origin = event.unified_msg_origin
-        if origin in self.extra_reference_images:
-            extra_images = self.extra_reference_images[origin]
-            images_data.extend(extra_images)
-            logger.info(
-                f"[Gemini Image] 已添加 {len(extra_images)} 张额外参考图片"
-            )
-            # 清除已使用的额外参考图片
-            del self.extra_reference_images[origin]
-
         return images_data
 
     def create_background_task(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task:

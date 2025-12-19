@@ -1,15 +1,9 @@
 {
   "enable_llm_tool": {
     "description": "启用 LLM 工具",
-    "hint": "启用后,LLM 可以在对话中自动调用图像生成功能",
+    "hint": "启用后,LLM 可以在对话中自动调用图像生成功能(支持通过 avatar_references 参数引用用户头像)",
     "type": "bool",
     "default": true
-  },
-  "enable_avatar_tool": {
-    "description": "启用获取用户头像工具",
-    "hint": "启用后,LLM 可以在自然语言调用时获取用户头像用于文生图",
-    "type": "bool",
-    "default": false
   },
   "use_system_provider": {
     "description": "使用系统已有的提供商",
