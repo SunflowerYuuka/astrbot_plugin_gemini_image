@@ -17,7 +17,7 @@
       },
       "api_type": {
         "description": "API 接口类型",
-        "hint": "选择使用的 API 协议类型",
+        "hint": "选择使用的 API 协议类型,注意,目前openai格式的接口无法控制分辨率和图片比例",
         "type": "string",
         "default": "gemini",
         "options": [
