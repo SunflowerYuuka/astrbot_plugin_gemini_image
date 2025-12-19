@@ -212,9 +212,14 @@ class GeminiImagePlugin(Star):
 
     def _load_config(self):
         """加载配置"""
-        self.api_type = self.config.get("api_type", "gemini")
-        use_system_provider = self.config.get("use_system_provider", True)
-        provider_id = (self.config.get("provider_id", "") or "").strip()
+        # 读取分组配置
+        api_config = self.config.get("api_config", {})
+        generate_config = self.config.get("generate_config", {})
+
+        # API 配置组
+        self.api_type = api_config.get("api_type", "gemini")
+        use_system_provider = api_config.get("use_system_provider", True)
+        provider_id = (api_config.get("provider_id", "") or "").strip()
 
         if (
             use_system_provider
@@ -228,26 +233,28 @@ class GeminiImagePlugin(Star):
             self._load_default_config()
 
         self.model = self._load_model_config()
-        self.timeout = self.config.get("timeout", 300)
-        self.enable_llm_tool = self.config.get("enable_llm_tool", True)
-        self.default_aspect_ratio = self.config.get("default_aspect_ratio", "1:1")
-        self.default_resolution = self.config.get("default_resolution", "1K")
-        self.max_retry_attempts = self.config.get("max_retry_attempts", 3)
-        self.presets = self._load_presets()
-        self.proxy = self.config.get("proxy", "") or None
-        self.safety_settings = self.config.get("safety_settings", "BLOCK_NONE")
+        self.proxy = api_config.get("proxy", "") or None
 
-        # 限制配置
-        self.max_image_size_mb = self.config.get("max_image_size_mb", 10)
-        self.max_requests_per_minute = self.config.get("max_requests_per_minute", 3)
+        # 生图配置组
+        self.timeout = generate_config.get("timeout", 300)
+        self.default_aspect_ratio = generate_config.get("default_aspect_ratio", "1:1")
+        self.default_resolution = generate_config.get("default_resolution", "1K")
+        self.max_retry_attempts = generate_config.get("max_retry_attempts", 3)
+        self.safety_settings = generate_config.get("safety_settings", "BLOCK_NONE")
+        self.max_image_size_mb = generate_config.get("max_image_size_mb", 10)
+        self.max_requests_per_minute = generate_config.get("max_requests_per_minute", 3)
 
         # 验证并发配置
-        max_concurrent = self.config.get(
+        max_concurrent = generate_config.get(
             "max_concurrent_generations", self.DEFAULT_MAX_CONCURRENT_GENERATIONS
         )
         self.max_concurrent_generations = min(
             max(1, max_concurrent), self.MAX_CONCURRENT_GENERATIONS
         )
+
+        # 顶层配置
+        self.enable_llm_tool = self.config.get("enable_llm_tool", True)
+        self.presets = self._load_presets()
 
     def _clean_base_url(self, url: str) -> str:
         """清洗 Base URL"""
@@ -296,11 +303,12 @@ class GeminiImagePlugin(Star):
 
     def _load_model_config(self) -> str:
         """加载模型配置"""
-        model = self.config.get("model", "gemini-2.0-flash-exp-image-generation")
+        api_config = self.config.get("api_config", {})
+        model = api_config.get("model", "gemini-2.0-flash-exp-image-generation")
         if model != "自定义模型":
             return model
         return (
-            self.config.get("custom_model", "").strip()
+            api_config.get("custom_model", "").strip()
             or "gemini-2.0-flash-exp-image-generation"
         )
 
@@ -322,7 +330,8 @@ class GeminiImagePlugin(Star):
 
     def _load_default_config(self):
         """加载默认配置"""
-        api_key = self.config.get("api_key", "")
+        api_config = self.config.get("api_config", {})
+        api_key = api_config.get("api_key", "")
         self.api_keys = (
             [k for k in api_key if k]
             if isinstance(api_key, list)
@@ -331,7 +340,7 @@ class GeminiImagePlugin(Star):
             else []
         )
         default_base = "https://generativelanguage.googleapis.com"
-        self.base_url = self._clean_base_url(self.config.get("base_url", default_base))
+        self.base_url = self._clean_base_url(api_config.get("base_url", default_base))
 
     def _check_rate_limit(self, user_id: str) -> bool:
         """检查用户请求频率是否超限"""
@@ -568,7 +577,10 @@ class GeminiImagePlugin(Star):
                 new_model = self.AVAILABLE_MODELS[index]
                 self.model = new_model
                 self.generator.model = new_model
-                self.config["model"] = new_model
+                # 保存到分组配置
+                if "api_config" not in self.config:
+                    self.config["api_config"] = {}
+                self.config["api_config"]["model"] = new_model
                 self.config.save_config()
                 yield event.plain_result(f"✅ 模型已切换: {new_model}")
             else:

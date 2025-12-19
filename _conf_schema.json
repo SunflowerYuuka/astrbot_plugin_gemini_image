@@ -5,138 +5,151 @@
     "type": "bool",
     "default": true
   },
-  "use_system_provider": {
-    "description": "使用系统已有的提供商",
-    "hint": "启用后从下方选择器中选择提供商,关闭后需手动配置 API Key 和 Base URL",
-    "type": "bool",
-    "default": true
-  },
-  "api_type": {
-    "description": "API 接口类型",
-    "hint": "选择使用的 API 协议类型",
-    "type": "string",
-    "default": "gemini",
-    "options": [
-      "gemini",
-      "openai",
-      "zai"
-    ]
-  },
-  "provider_id": {
-    "description": "选择提供商",
-    "hint": "从系统已配置的提供商中选择一个用于图像生成",
-    "type": "string",
-    "default": "",
-    "_special": "select_provider"
-  },
-  "base_url": {
-    "description": "API Base URL",
-    "hint": "仅在不使用系统提供商时需要填写",
-    "type": "string",
-    "default": "https://generativelanguage.googleapis.com"
-  },
-  "api_key": {
-    "description": "Gemini API Key(s)",
-    "hint": "仅在不使用系统提供商时需要填写。支持多个 key 用于自动轮询,提高稳定性",
-    "type": "list",
-    "default": []
-  },
-  "proxy": {
-    "description": "代理地址",
-    "hint": "例如: http://127.0.0.1:7890",
-    "type": "string",
-    "default": ""
-  },
-  "safety_settings": {
-    "description": "安全过滤级别",
-    "hint": "控制内容安全过滤的强度",
-    "type": "string",
-    "default": "BLOCK_NONE",
-    "options": [
-      "BLOCK_NONE",
-      "BLOCK_ONLY_HIGH",
-      "BLOCK_MEDIUM_AND_ABOVE",
-      "BLOCK_LOW_AND_ABOVE"
-    ]
-  },
-  "model": {
-    "description": "生图模型",
-    "hint": "选择要使用的 Gemini 图像生成模型,选择 '自定义模型' 时使用下方自定义模型名称",
-    "type": "string",
-    "default": "gemini-2.5-flash-image-preview",
-    "options": [
-      "gemini-2.0-flash-exp-image-generation",
-      "gemini-2.5-flash-image",
-      "gemini-2.5-flash-image-preview",
-      "gemini-3-pro-image-preview",
-      "自定义模型"
-    ]
-  },
-  "custom_model": {
-    "description": "自定义模型名称",
-    "hint": "仅在上方模型选择 '自定义模型' 时生效。填写自定义的 Gemini 图像生成模型名称",
-    "type": "string",
-    "default": ""
-  },
-  "timeout": {
-    "description": "生图超时时间（秒）",
-    "hint": "生成图片的最长等待时间,超时将返回错误",
-    "type": "int",
-    "default": 300
-  },
-  "default_aspect_ratio": {
-    "description": "默认宽高比",
-    "hint": "使用命令生图时默认使用的图片宽高比",
-    "type": "string",
-    "default": "自动",
-    "options": [
-      "自动",
-      "1:1",
-      "2:3",
-      "3:2",
-      "3:4",
-      "4:3",
-      "4:5",
-      "5:4",
-      "9:16",
-      "16:9",
-      "21:9"
-    ]
-  },
-  "default_resolution": {
-    "description": "默认分辨率",
-    "hint": "使用命令生图时默认使用的图片分辨率,仅 Gemini 3 Pro 模型支持",
-    "type": "string",
-    "default": "2K",
-    "options": [
-      "1K",
-      "2K",
-      "4K"
-    ]
-  },
-  "max_concurrent_generations": {
-    "description": "最大并发生成数",
-    "hint": "同时生成图片的最大数量,防止资源耗尽",
-    "type": "int",
-    "default": 3
-  },
-  "max_requests_per_minute": {
-    "description": "每分钟最大请求数",
-    "hint": "单个用户每分钟最多可以发起的图片生成请求数",
-    "type": "int",
-    "default": 3
-  },
-  "max_image_size_mb": {
-    "description": "最大图片大小(MB)",
-    "hint": "用户上传的参考图片最大允许大小",
-    "type": "int",
-    "default": 10
-  },
-  "max_retry_attempts": {
-    "description": "生图失败重试次数",
-    "hint": "当图片生成失败时,自动重试的最大次数(默认3次)",
-    "type": "int",
-    "default": 3
+  "api_config": {
+    "description": "生图API配置",
+    "type": "object",
+    "items": {
+      "use_system_provider": {
+        "description": "使用系统已有的提供商",
+        "hint": "启用后从下方选择器中选择提供商,关闭后需手动配置 API Key 和 Base URL",
+        "type": "bool",
+        "default": true
+      },
+      "api_type": {
+        "description": "API 接口类型",
+        "hint": "选择使用的 API 协议类型",
+        "type": "string",
+        "default": "gemini",
+        "options": [
+          "gemini",
+          "openai",
+          "zai"
+        ]
+      },
+      "provider_id": {
+        "description": "选择提供商",
+        "hint": "从系统已配置的提供商中选择一个用于图像生成",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider"
+      },
+      "base_url": {
+        "description": "API Base URL",
+        "hint": "仅在不使用系统提供商时需要填写",
+        "type": "string",
+        "default": "https://generativelanguage.googleapis.com"
+      },
+      "api_key": {
+        "description": "Gemini API Key(s)",
+        "hint": "仅在不使用系统提供商时需要填写。支持多个 key 用于自动轮询,提高稳定性",
+        "type": "list",
+        "default": []
+      },
+      "proxy": {
+        "description": "代理地址",
+        "hint": "例如: http://127.0.0.1:7890",
+        "type": "string",
+        "default": ""
+      },
+      "model": {
+        "description": "生图模型",
+        "hint": "选择要使用的 Gemini 图像生成模型,选择 '自定义模型' 时使用下方自定义模型名称",
+        "type": "string",
+        "default": "gemini-2.5-flash-image-preview",
+        "options": [
+          "gemini-2.0-flash-exp-image-generation",
+          "gemini-2.5-flash-image",
+          "gemini-2.5-flash-image-preview",
+          "gemini-3-pro-image-preview",
+          "自定义模型"
+        ]
+      },
+      "custom_model": {
+        "description": "自定义模型名称",
+        "hint": "仅在上方模型选择 '自定义模型' 时生效。填写自定义的 Gemini 图像生成模型名称",
+        "type": "string",
+        "default": ""
+      }
+    }
+  }
+  ,
+  "generate_config":{
+    "description":"生图配置",
+    "type":"object",
+    "items":{
+      "safety_settings": {
+        "description": "安全过滤级别",
+        "hint": "控制内容安全过滤的强度",
+        "type": "string",
+        "default": "BLOCK_NONE",
+        "options": [
+          "BLOCK_NONE",
+          "BLOCK_ONLY_HIGH",
+          "BLOCK_MEDIUM_AND_ABOVE",
+          "BLOCK_LOW_AND_ABOVE"
+        ]
+      },
+      "timeout": {
+        "description": "生图超时时间（秒）",
+        "hint": "生成图片的最长等待时间,超时将返回错误",
+        "type": "int",
+        "default": 300
+      },
+      "default_aspect_ratio": {
+        "description": "默认宽高比",
+        "hint": "使用命令生图时默认使用的图片宽高比",
+        "type": "string",
+        "default": "自动",
+        "options": [
+          "自动",
+          "1:1",
+          "2:3",
+          "3:2",
+          "3:4",
+          "4:3",
+          "4:5",
+          "5:4",
+          "9:16",
+          "16:9",
+          "21:9"
+        ]
+      },
+      "default_resolution": {
+        "description": "默认分辨率",
+        "hint": "使用命令生图时默认使用的图片分辨率,仅 Gemini 3 Pro 模型支持",
+        "type": "string",
+        "default": "2K",
+        "options": [
+          "1K",
+          "2K",
+          "4K"
+        ]
+      },
+      "max_concurrent_generations": {
+        "description": "最大并发生成数",
+        "hint": "同时生成图片的最大数量,防止资源耗尽",
+        "type": "int",
+        "default": 3
+      },
+      "max_requests_per_minute": {
+        "description": "每分钟最大请求数",
+        "hint": "单个用户每分钟最多可以发起的图片生成请求数",
+        "type": "int",
+        "default": 3
+      },
+      "max_image_size_mb": {
+        "description": "最大图片大小(MB)",
+        "hint": "用户上传的参考图片最大允许大小",
+        "type": "int",
+        "default": 10
+      },
+      "max_retry_attempts": {
+        "description": "生图失败重试次数",
+        "hint": "当图片生成失败时,自动重试的最大次数(默认3次)",
+        "type": "int",
+        "default": 3
+      }
+    }
   },
   "presets": {
     "description": "预设提示词",
