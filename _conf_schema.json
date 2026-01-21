@@ -191,6 +191,18 @@
         "type": "list",
         "default": [],
         "hint": "填入群组ID"
+      },
+      "no_permission_reply": {
+        "description": "无权限回复语",
+        "type": "string",
+        "default": "❌ 您没有权限使用此功能",
+        "hint": "当用户没有权限时回复的内容"
+      },
+      "silent_on_no_permission": {
+        "description": "无权限时静默",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，当用户没有权限时将不回复任何消息"
       }
     }
   }

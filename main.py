@@ -104,7 +104,7 @@ class GeminiImageGenerationTool(FunctionTool[AstrAgentContext]):
         user_id = str(event.get_sender_id() or event.unified_msg_origin)
         group_id = event.message_obj.group_id or ""
         if hasattr(plugin, "_check_permission") and not plugin._check_permission(user_id, group_id):
-            return "❌ 您没有权限使用此功能 (Permission Denied)"
+            return f"{plugin.perm_no_permission_reply} (Permission Denied)"
 
         if not plugin.generator.api_keys:
             return "❌ 未配置 API Key，无法生成图片"
@@ -267,6 +267,8 @@ class GeminiImagePlugin(Star):
         self.perm_mode = perm_conf.get("mode", "disable")
         self.perm_users = set(perm_conf.get("users", []))
         self.perm_groups = set(perm_conf.get("groups", []))
+        self.perm_no_permission_reply = perm_conf.get("no_permission_reply", "❌ 您没有权限使用此功能")
+        self.perm_silent = perm_conf.get("silent_on_no_permission", False)
 
     def _check_permission(self, user_id: str, group_id: str = "") -> bool:
         """检查权限"""
@@ -413,8 +415,9 @@ class GeminiImagePlugin(Star):
         group_id = event.message_obj.group_id or ""
 
         if not self._check_permission(user_id, group_id):
-            # 权限不足时不回复或回复提示，这里选择回复提示
-            yield event.plain_result("❌ 您没有权限使用此功能")
+            # 权限不足
+            if not self.perm_silent:
+                yield event.plain_result(self.perm_no_permission_reply)
             return
 
         if not self._check_rate_limit(user_id):
