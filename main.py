@@ -1,6 +1,8 @@
 """
 Gemini Image Generation Plugin
-使用 Gemini 系列模型进行图像生成的插件
+功能：文生图、图生图、白名单管理、网络连通性测试、模型切换、预设管理
+安全更新：增加 API Key 自动脱敏，防止报错信息泄露密钥
+优化：移除全局关键词拦截，防止误触
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ import time
 from collections.abc import Coroutine
 from typing import Any
 
+import aiohttp # 用于测试网络连接
 from pydantic import Field
 from pydantic.dataclasses import dataclass as pydantic_dataclass
 
@@ -32,42 +35,31 @@ from .gemini_generator import GeminiImageGenerator
 
 @pydantic_dataclass
 class GeminiImageGenerationTool(FunctionTool[AstrAgentContext]):
-    """统一的图像生成工具，支持文生图和图生图"""
+    """统一的图像生成工具"""
 
     name: str = "gemini_generate_image"
-    description: str = "使用 Gemini 模型生成或修改图片(需权限验证，非授权用户请勿调用)"
+    description: str = "使用 Gemini 模型生成或修改图片。仅在用户明确要求生成图像时使用此工具。"
     parameters: dict = Field(
         default_factory=lambda: {
             "type": "object",
             "properties": {
                 "prompt": {
                     "type": "string",
-                    "description": "生图时使用的提示词(直接将用户发送的内容原样传递给模型)",
+                    "description": "生图提示词",
                 },
                 "aspect_ratio": {
                     "type": "string",
                     "description": "图片宽高比",
-                    "enum": [
-                        "1:1",
-                        "2:3",
-                        "3:2",
-                        "3:4",
-                        "4:3",
-                        "4:5",
-                        "5:4",
-                        "9:16",
-                        "16:9",
-                        "21:9",
-                    ],
+                    "enum": ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"],
                 },
                 "resolution": {
                     "type": "string",
-                    "description": "图片分辨率，仅 gemini-3-pro-image-preview(nano banana pro) 模型支持",
+                    "description": "分辨率(仅 Pro 模型支持)",
                     "enum": ["1K", "2K", "4K"],
                 },
                 "avatar_references": {
                     "type": "array",
-                    "description": "需要作为参考的用户头像列表。支持: 'self'(机器人头像)、'sender'(发送者头像)、或具体的QQ号",
+                    "description": "参考头像(self/sender/qq号)",
                     "items": {"type": "string"},
                 },
             },
@@ -77,129 +69,69 @@ class GeminiImageGenerationTool(FunctionTool[AstrAgentContext]):
 
     plugin: object | None = None
 
-    async def call(
-        self, context: ContextWrapper[AstrAgentContext], **kwargs
-    ) -> ToolExecResult:
+    async def call(self, context: ContextWrapper[AstrAgentContext], **kwargs) -> ToolExecResult:
         if not (prompt := kwargs.get("prompt", "")):
-            return "请提供图片生成的提示词"
+            return "请提供提示词"
 
         plugin = self.plugin
         if not plugin:
-            return "❌ 插件未正确初始化 (Plugin instance missing)"
+            return "❌ 插件未初始化"
 
         event = None
-        if hasattr(context, "context") and isinstance(
-            context.context, AstrAgentContext
-        ):
+        if hasattr(context, "context") and isinstance(context.context, AstrAgentContext):
             event = context.context.event
         elif isinstance(context, dict):
             event = context.get("event")
 
         if not event:
-            logger.warning(
-                f"[Gemini Image] Tool call context missing event. Context type: {type(context)}"
-            )
-            return "❌ 无法获取当前消息上下文"
+            return "❌ 无法获取上下文"
 
-        # Enhanced User ID Extraction & Debugging
-        user_id = event.get_sender_id()
-        if not user_id and event.message_obj and event.message_obj.sender:
-            user_id = event.message_obj.sender.user_id
-        if not user_id:
-            user_id = event.unified_msg_origin
+        # --- 白名单拦截 ---
+        user_id = event.unified_msg_origin
+        group_id = getattr(event.message_obj, "group_id", None)
+        sender_id = str(event.message_obj.sender.user_id) if event.message_obj.sender else user_id
         
-        user_id = str(user_id).strip()
-        group_id = event.message_obj.group_id or ""
-
-        # DEBUG: Log the values used for permission check
-        logger.info(f"[Gemini Permission] Tool Call - User: {user_id}, Group: {group_id}")
-        if hasattr(plugin, "perm_users"):
-             logger.info(f"[Gemini Permission] Config - Mode: {plugin.perm_mode}, Users: {plugin.perm_users}")
-
-        # Permission Check
-        if hasattr(plugin, "_check_permission"):
-            if not plugin._check_permission(user_id, group_id):
-                logger.warning(f"[Gemini Permission] DENIED for User: {user_id}")
-                                # SYSTEM STOP INSTRUCTION
-                if plugin.perm_silent:
-                    return "SYSTEM_NOTIFICATION: Permission denied. User unauthorized. EXECUTION STOPPED. Do NOT generate image. Do NOT reply to the user. END."
-                else:
-                    return f"SYSTEM_NOTIFICATION: Permission denied. EXECUTION STOPPED. Reply to user: '{plugin.perm_no_permission_reply}'" 
-            else:
-                logger.info(f"[Gemini Permission] ALLOWED for User: {user_id}")
-        else:
-            logger.error("[Gemini Permission] Plugin instance missing _check_permission method")
+        if not plugin._check_permission(sender_id, str(group_id) if group_id else None):
+            logger.info(f"[Gemini Image] LLM工具调用拦截: {sender_id}")
+            return "❌ 拒绝：您没有权限使用此功能(白名单拦截)"
+        # ----------------
 
         if not plugin.generator.api_keys:
-            return "❌ 未配置 API Key，无法生成图片"
+            return "❌ 未配置 API Key"
 
-        # 获取参考图片
+        # 获取参考图
         images_data = await plugin._get_reference_images_for_tool(event)
+        
+        # 处理头像引用
+        for ref in kwargs.get("avatar_references", []):
+            if not isinstance(ref, str): continue
+            uid = None
+            if ref == "self": uid = str(event.get_self_id())
+            elif ref == "sender": uid = str(event.get_sender_id() or event.unified_msg_origin)
+            else: uid = ref
+            
+            if uid and (avatar := await plugin.get_avatar(uid)):
+                images_data.append((avatar, "image/jpeg"))
 
-        # 处理头像引用参数
-        avatar_references = kwargs.get("avatar_references", [])
-        if avatar_references and isinstance(avatar_references, list):
-            for ref in avatar_references:
-                if not isinstance(ref, str):
-                    continue
-
-                ref = ref.strip().lower()
-                user_id = None
-
-                if ref == "self":
-                    # 获取机器人自己的头像
-                    user_id = str(event.get_self_id())
-                elif ref == "sender":
-                    # 获取发送者的头像
-                    user_id = str(event.get_sender_id() or event.unified_msg_origin)
-                else:
-                    # 作为QQ号处理
-                    user_id = ref
-
-                if user_id:
-                    avatar_data = await plugin.get_avatar(user_id)
-                    if avatar_data:
-                        images_data.append((avatar_data, "image/jpeg"))
-                        logger.info(f"[Gemini Image] 已添加用户 {user_id} 的头像作为参考图片")
-                    else:
-                        logger.warning(f"[Gemini Image] 无法获取用户 {user_id} 的头像")
-
-        # 生成任务 ID
-        task_id = hashlib.md5(
-            f"{time.time()}{event.unified_msg_origin}".encode()
-        ).hexdigest()[:8]
-
-        # 记录任务摘要
-        res = kwargs.get("resolution", plugin.default_resolution)
-        ar = kwargs.get("aspect_ratio", plugin.default_aspect_ratio)
-        img_count = len(images_data) if images_data else 0
-        logger.info(
-            f"[Gemini Image] 任务摘要 [{task_id}] - 提示词: {prompt} | 预设: 无 | 参考图: {img_count}张 | 分辨率: {res} | 比例: {ar}"
-        )
-
+        task_id = hashlib.md5(f"{time.time()}{user_id}".encode()).hexdigest()[:8]
+        
+        # 修复参数名匹配问题
         plugin.create_background_task(
             plugin._generate_and_send_image_async(
                 prompt=prompt,
-                images_data=images_data or None,
-                unified_msg_origin=event.unified_msg_origin,
-                aspect_ratio=ar,
-                resolution=res,
-                task_id=task_id,
+                target=event.unified_msg_origin, # 对应 target
+                refs=images_data or None,        # 对应 refs
+                ar=kwargs.get("aspect_ratio", plugin.default_aspect_ratio), # 对应 ar
+                res=kwargs.get("resolution", plugin.default_resolution),    # 对应 res
+                tid=task_id,                     # 对应 tid
             )
         )
-
-        mode = "图生图" if images_data else "文生图"
-        return f"已启动{mode}任务"
+        return "✅ 生图任务已启动，请稍候..."
 
 
 class GeminiImagePlugin(Star):
     """Gemini 图像生成插件"""
 
-    # 配置验证常量
-    DEFAULT_MAX_CONCURRENT_GENERATIONS = 3
-    MAX_CONCURRENT_GENERATIONS = 10
-
-    # 可用模型列表
     AVAILABLE_MODELS = [
         "gemini-2.0-flash-exp-image-generation",
         "gemini-2.5-flash-image",
@@ -211,8 +143,15 @@ class GeminiImagePlugin(Star):
         super().__init__(context)
         self.context = context
         self.config = config or AstrBotConfig()
+        
+        # 初始化基础属性
+        self.api_keys = []
+        self.base_url = ""
+        self.proxy = None
+        self.user_request_timestamps = {}
+        self.background_tasks = set()
 
-        # 读取配置
+        # 加载配置
         self._load_config()
 
         # 初始化生成器
@@ -227,454 +166,193 @@ class GeminiImagePlugin(Star):
             safety_settings=self.safety_settings,
         )
 
-        self.background_tasks: set[asyncio.Task] = set()
         self._generation_semaphore = asyncio.Semaphore(self.max_concurrent_generations)
 
-        # 频率限制 {user_id: [timestamp, ...]}
-        self.user_request_timestamps: dict[str, list[float]] = {}
-
-        # 注册工具到 LLM
         if self.enable_llm_tool:
             self.context.add_llm_tools(GeminiImageGenerationTool(plugin=self))
-            logger.info("[Gemini Image] 已注册图像生成工具（支持头像引用）")
 
-        logger.info(f"[Gemini Image] 插件已加载，使用模型: {self.model}")
+        logger.info(f"[Gemini Image] 插件加载完成 | 模型: {self.model} | 代理: {self.proxy or '无'}")
 
     def _load_config(self):
         """加载配置"""
-        # 读取分组配置
         api_config = self.config.get("api_config", {})
-        generate_config = self.config.get("generate_config", {})
-
-        # API 配置组
-        self.api_type = api_config.get("api_type", "gemini")
-        use_system_provider = api_config.get("use_system_provider", True)
-        provider_id = (api_config.get("provider_id", "") or "").strip()
-
-        if (
-            use_system_provider
-            and provider_id
-            and self._load_provider_config(provider_id)
-        ):
-            pass
-        else:
-            if use_system_provider and not provider_id:
-                logger.warning("[Gemini Image] 未配置提供商 ID，将使用插件配置")
-            self._load_default_config()
-
-        self.model = self._load_model_config()
-        self.proxy = api_config.get("proxy", "") or None
-
-        # 生图配置组
-        self.timeout = generate_config.get("timeout", 300)
-        self.default_aspect_ratio = generate_config.get("default_aspect_ratio", "1:1")
-        self.default_resolution = generate_config.get("default_resolution", "1K")
-        self.max_retry_attempts = generate_config.get("max_retry_attempts", 3)
-        self.safety_settings = generate_config.get("safety_settings", "BLOCK_NONE")
-        self.max_image_size_mb = generate_config.get("max_image_size_mb", 10)
-        self.max_requests_per_minute = generate_config.get("max_requests_per_minute", 3)
-
-        # 验证并发配置
-        max_concurrent = generate_config.get(
-            "max_concurrent_generations", self.DEFAULT_MAX_CONCURRENT_GENERATIONS
-        )
-        self.max_concurrent_generations = min(
-            max(1, max_concurrent), self.MAX_CONCURRENT_GENERATIONS
-        )
-
-        # 顶层配置
-        self.enable_llm_tool = self.config.get("enable_llm_tool", True)
-        self.presets = self._load_presets()
-        
-        # 权限配置
+        gen_config = self.config.get("generate_config", {})
+        wl_config = self.config.get("whitelist_config", {})
         perm_conf = self.config.get("permission_config", {})
-        self.perm_mode = perm_conf.get("mode", "disable")
-        self.perm_users = set(perm_conf.get("users", []))
-        self.perm_groups = set(perm_conf.get("groups", []))
+
+        # 白名单
+        self.enable_whitelist = wl_config.get("enable_whitelist", False)
+        self.allowed_groups = [str(x) for x in wl_config.get("allowed_groups", [])]
+        self.allowed_users = [str(x) for x in wl_config.get("allowed_users", [])]
+
+        # 拦截配置 (从 main.bak.py 迁移)
         self.perm_no_permission_reply = perm_conf.get("no_permission_reply", "❌ 您没有权限使用此功能")
         self.perm_silent = perm_conf.get("silent_on_no_permission", False)
         self.perm_intercept_keywords = perm_conf.get("intercept_keywords", ["画", "绘", "图", "draw", "image", "photo", "generate", "生图"])
 
-    def _check_permission(self, user_id: str, group_id: str = "") -> bool:
-        """检查权限"""
-        # 实时读取配置
-        perm_conf = self.config.get("permission_config", {})
-        mode = perm_conf.get("mode", "disable").strip()
+        # 基础 API 配置
+        self.api_type = api_config.get("api_type", "gemini")
+        provider_id = api_config.get("provider_id", "")
+        
+        # 1. 优先读取插件配置中的代理
+        self.proxy = api_config.get("proxy", "").strip() or None
 
-        if mode == "disable":
-            return True
-            
-        user_id = str(user_id).strip()
-        group_id = str(group_id).strip()
+        # 2. 如果使用系统提供商
+        use_system = api_config.get("use_system_provider", True)
+        loaded_system = False
+        if use_system and provider_id:
+            loaded_system = self._load_provider_config(provider_id)
         
-        # 统一转为字符串集合进行比对，去除空格
-        limit_users = {str(u).strip() for u in perm_conf.get("users", [])}
-        limit_groups = {str(g).strip() for g in perm_conf.get("groups", [])}
-        
-        logger.info(f"[Gemini Image] Perm Check: mode={mode}, user={user_id}, lists={limit_users}, groups={limit_groups}, group_id={group_id}")
-        
-        if mode == "blacklist":
-            # 黑名单模式: 在名单内则禁止
-            if user_id in limit_users:
-                return False
-            if group_id and group_id in limit_groups:
-                return False
-            return True
-            
-        elif mode == "whitelist":
-            # 白名单模式: 在名单内才允许
-            if user_id in limit_users:
-                return True
-            if group_id and group_id in limit_groups:
-                return True
-            # 不在白名单中 -> 禁止
-            return False
-            
-        return True
+        # 3. 如果没用系统提供商，或者系统提供商加载失败，加载手动配置
+        if not loaded_system:
+            if use_system: logger.warning("[Gemini Image] 系统提供商加载失败，尝试使用手动配置")
+            self._load_manual_config(api_config)
 
-    def _clean_base_url(self, url: str) -> str:
-        """清洗 Base URL"""
-        if not url:
-            return ""
-        url = url.rstrip("/")
-        # 移除 /v1 及其后的所有内容 (包括 /v1beta, /v1/chat 等)
-        if "/v1" in url:
-            url = url.split("/v1", 1)[0]
-        return url.rstrip("/")
+        self.model = self._load_model_config()
+
+        # 生图参数
+        self.timeout = gen_config.get("timeout", 300)
+        self.default_aspect_ratio = gen_config.get("default_aspect_ratio", "1:1")
+        self.default_resolution = gen_config.get("default_resolution", "1K")
+        self.max_retry_attempts = gen_config.get("max_retry_attempts", 3)
+        self.safety_settings = gen_config.get("safety_settings", "BLOCK_NONE")
+        self.max_image_size_mb = gen_config.get("max_image_size_mb", 10)
+        self.max_requests_per_minute = gen_config.get("max_requests_per_minute", 3)
+        self.debug_mode = gen_config.get("debug_mode", False)
+        
+        mc = gen_config.get("max_concurrent_generations", 3)
+        self.max_concurrent_generations = max(1, min(mc, 10))
+
+        self.enable_llm_tool = self.config.get("enable_llm_tool", True)
+        self.presets = self._load_presets()
 
     def _load_provider_config(self, provider_id: str) -> bool:
-        """从系统提供商加载配置"""
+        """从系统提供商加载"""
         provider = self.context.get_provider_by_id(provider_id)
-        if not provider:
-            logger.warning(f"[Gemini Image] 未找到提供商 {provider_id}，将使用插件配置")
-            return False
+        if not provider: return False
+        
+        cfg = getattr(provider, "provider_config", {}) or {}
+        
+        # 提取 Keys
+        keys = cfg.get("api_key") or cfg.get("key") or cfg.get("keys") or cfg.get("access_token")
+        if not keys: return False
+        self.api_keys = [keys] if isinstance(keys, str) else keys
 
-        provider_config = getattr(provider, "provider_config", {}) or {}
+        # 提取 Base URL
+        base = getattr(provider, "api_base", None) or cfg.get("api_base") or cfg.get("api_base_url")
+        self.base_url = self._clean_base_url(base or "https://generativelanguage.googleapis.com")
 
-        # 提取 keys
-        api_keys = []
-        for key_field in ["key", "keys", "api_key", "access_token"]:
-            if keys := provider_config.get(key_field):
-                api_keys = [keys] if isinstance(keys, str) else [k for k in keys if k]
-                break
+        if not self.proxy:
+            sys_proxy = getattr(provider, "proxy", None) or cfg.get("proxy")
+            if sys_proxy:
+                self.proxy = sys_proxy
+                logger.info(f"[Gemini Image] 继承系统代理: {self.proxy}")
 
-        # 提取 base_url
-        api_base = (
-            getattr(provider, "api_base", None)
-            or provider_config.get("api_base")
-            or provider_config.get("api_base_url")
-        )
-
-        if not api_keys:
-            logger.warning(f"[Gemini Image] 提供商 {provider_id} 未提供可用的 API Key")
-            return False
-
-        self.api_keys = api_keys
-        self.base_url = self._clean_base_url(
-            api_base or "https://generativelanguage.googleapis.com"
-        )
-
-        logger.info(f"[Gemini Image] 使用系统提供商: {provider_id}")
         return True
+
+    def _load_manual_config(self, api_config):
+        keys = api_config.get("api_key", [])
+        self.api_keys = [k for k in keys if k] if isinstance(keys, list) else [keys] if keys else []
+        self.base_url = self._clean_base_url(api_config.get("base_url", "https://generativelanguage.googleapis.com"))
 
     def _load_model_config(self) -> str:
-        """加载模型配置"""
-        api_config = self.config.get("api_config", {})
-        model = api_config.get("model", "gemini-2.0-flash-exp-image-generation")
-        if model != "自定义模型":
-            return model
-        return (
-            api_config.get("custom_model", "").strip()
-            or "gemini-2.0-flash-exp-image-generation"
-        )
+        model = self.config.get("api_config", {}).get("model", "gemini-2.5-flash-image")
+        if model == "自定义模型":
+            return self.config.get("api_config", {}).get("custom_model", "")
+        return model
 
-    def _load_presets(self) -> dict[str, str]:
-        """加载预设提示词配置"""
-        presets_config = self.config.get("presets", [])
-        presets_dict = {}
+    def _clean_base_url(self, url: str) -> str:
+        if not url: return ""
+        url = url.rstrip("/")
+        if "/v1" in url: url = url.split("/v1", 1)[0]
+        return url.rstrip("/")
 
-        if not isinstance(presets_config, list):
-            return presets_dict
+    def _load_presets(self) -> dict:
+        raw = self.config.get("presets", [])
+        presets = {}
+        for p in raw:
+            if isinstance(p, str) and ":" in p:
+                k, v = p.split(":", 1)
+                presets[k.strip()] = v.strip()
+        return presets
 
-        for preset_str in presets_config:
-            if isinstance(preset_str, str) and ":" in preset_str:
-                name, prompt = preset_str.split(":", 1)
-                if name.strip() and prompt.strip():
-                    presets_dict[name.strip()] = prompt.strip()
-
-        return presets_dict
-
-    def _load_default_config(self):
-        """加载默认配置"""
-        api_config = self.config.get("api_config", {})
-        api_key = api_config.get("api_key", "")
-        self.api_keys = (
-            [k for k in api_key if k]
-            if isinstance(api_key, list)
-            else [api_key]
-            if api_key
-            else []
-        )
-        default_base = "https://generativelanguage.googleapis.com"
-        self.base_url = self._clean_base_url(api_config.get("base_url", default_base))
+    def _check_permission(self, user_id: str, group_id: str | None = None) -> bool:
+        if not self.enable_whitelist: return True
+        if str(user_id) in self.allowed_users: return True
+        if group_id and str(group_id) in self.allowed_groups: return True
+        return False
 
     def _check_rate_limit(self, user_id: str) -> bool:
-        """检查用户请求频率是否超限"""
         now = time.time()
-        timestamps = self.user_request_timestamps.setdefault(user_id, [])
-
-        # 移除一分钟前的记录
-        valid_timestamps = [t for t in timestamps if now - t < 60]
-        self.user_request_timestamps[user_id] = valid_timestamps
-
-        if len(valid_timestamps) >= self.max_requests_per_minute:
-            return False
-
-        valid_timestamps.append(now)
+        ts = self.user_request_timestamps.setdefault(user_id, [])
+        ts = [t for t in ts if now - t < 60]
+        self.user_request_timestamps[user_id] = ts
+        if len(ts) >= self.max_requests_per_minute: return False
+        ts.append(now)
         return True
 
-    @filter.event_message_type(EventMessageType.ALL)
-    async def intercept_drawing_request(self, event: AstrMessageEvent):
-        "拦截无权限用户的画图请求，防止触发 LLM"
-        message_str = event.message_str or ""
-        if not message_str:
+    # --- 安全脱敏函数 ---
+    def _sanitize_error_msg(self, error_msg: str) -> str:
+        """检查并隐藏敏感信息 (API Key)"""
+        if not error_msg: return "未知错误"
+        msg_str = str(error_msg)
+        # 只要包含敏感特征，立即返回通用错误，不输出原始信息
+        if "api_key" in msg_str or "AIza" in msg_str:
+            # 记录完整日志到后台，方便管理员排查
+            logger.error(f"[Gemini Image] 安全拦截敏感报错: {msg_str}")
+            return "⚠️ API 鉴权失败 (Key 无效或已暂停)。\n(为保护安全，详细报错已隐藏，请查看后台日志)"
+        return msg_str
+
+    # 已移除 intercept_drawing_request 方法，防止误触
+
+    @filter.command("gemini_test")
+    async def test_connectivity(self, event: AstrMessageEvent):
+        """测试 Gemini API 连通性"""
+        user_id = event.unified_msg_origin
+        sender_id = str(event.message_obj.sender.user_id) if event.message_obj.sender else user_id
+        if self.enable_whitelist and not self._check_permission(sender_id):
+            yield event.plain_result("❌ 无权执行测试")
             return
 
-        # 获取用户信息
-        user_id = event.get_sender_id()
-        if not user_id and event.message_obj and event.message_obj.sender:
-            user_id = event.message_obj.sender.user_id
-        if not user_id:
-            user_id = event.unified_msg_origin
-        user_id = str(user_id).strip()
-        group_id = event.message_obj.group_id or ""
+        proxy_status = f"当前配置代理: {self.proxy}" if self.proxy else "当前未配置代理 (直连)"
+        yield event.plain_result(f"🔄 开始测试网络连通性...\n{proxy_status}")
 
-        # 检查权限
-        if self._check_permission(user_id, group_id):
-            return  # 有权限，放行
-
-        # 无权限，检查是否包含拦截关键词
-        if not self.perm_intercept_keywords:
-            return
-
-        for keyword in self.perm_intercept_keywords:
-            if keyword in message_str:
-                logger.info(f"[Gemini Image] Intercepting unauthorized drawing request from {user_id}: {message_str}")
-                
-                # 拦截
-                event.stop_event() # 停止事件传播
-                
-                if not self.perm_silent:
-                    yield event.plain_result(self.perm_no_permission_reply)
-                return
-
-    @filter.command("生图")
-    async def generate_image_command(self, event: AstrMessageEvent):
-        """生成图片指令"""
-        user_id = str(event.get_sender_id() or event.unified_msg_origin)
-        group_id = event.message_obj.group_id or ""
-
-        if not self._check_permission(user_id, group_id):
-            # 权限不足
-            if not self.perm_silent:
-                yield event.plain_result(self.perm_no_permission_reply)
-            return
-
-        if not self._check_rate_limit(user_id):
-            yield event.plain_result(
-                f"❌ 请求过于频繁，请稍后再试 (每分钟限 {self.max_requests_per_minute} 次)"
-            )
-            return
-
-        masked_uid = (
-            user_id[:4] + "****" + user_id[-4:] if len(user_id) > 8 else user_id
-        )
-
-        user_input = (event.message_str or "").strip()
-        logger.info(
-            f"[Gemini Image] 收到生图指令 - 用户: {masked_uid}, 原始输入: {user_input}"
-        )
-
-        # 移除指令前缀
-        cmd_parts = user_input.split(maxsplit=1)
-        if not cmd_parts:
-            return
-
-        # 如果只有指令本身，且没有参数
-        prompt = ""
-        if len(cmd_parts) > 1:
-            prompt = cmd_parts[1].strip()
-
-        # 默认参数
-        aspect_ratio = self.default_aspect_ratio
-        resolution = self.default_resolution
-
-        # 检查是否使用了预设
-        matched_preset = None
-        extra_content = ""
-
-        if prompt:
-            # 分割第一部分作为潜在的预设名称
-            parts = prompt.split(maxsplit=1)
-            first_token = parts[0]
-            rest_token = parts[1] if len(parts) > 1 else ""
-
-            # 检查是否匹配预设
-            if first_token in self.presets:
-                matched_preset = first_token
-                extra_content = rest_token
-            else:
-                # 大小写不敏感匹配
-                for name in self.presets:
-                    if name.lower() == first_token.lower():
-                        matched_preset = name
-                        extra_content = rest_token
-                        break
-
-        if matched_preset:
-            logger.info(f"[Gemini Image] 命中预设: {matched_preset}")
-            preset_content = self.presets[matched_preset]
-
-            # 尝试解析 JSON 格式的预设
-            try:
-                if preset_content.strip().startswith("{"):
-                    preset_data = json.loads(preset_content)
-                    if isinstance(preset_data, dict):
-                        prompt = preset_data.get("prompt", "")
-                        aspect_ratio = preset_data.get("aspect_ratio", aspect_ratio)
-                        resolution = preset_data.get("resolution", resolution)
+        target_url = "https://generativelanguage.googleapis.com"
+        
+        try:
+            start_time = time.time()
+            async with aiohttp.ClientSession() as session:
+                async with session.get(target_url, proxy=self.proxy, timeout=10) as resp:
+                    latency = (time.time() - start_time) * 1000
+                    status = resp.status
+                    
+                    if status == 200 or status == 404: 
+                        msg = (f"✅ **连接成功！**\n"
+                               f"目标: Google API\n"
+                               f"状态码: {status}\n"
+                               f"延迟: {latency:.2f}ms\n"
+                               f"代理生效: {'是' if self.proxy else '否'}")
                     else:
-                        prompt = preset_content
-                else:
-                    prompt = preset_content
-            except json.JSONDecodeError:
-                prompt = preset_content
-
-            # 如果有额外内容，追加到提示词后
-            if extra_content:
-                prompt = f"{prompt} {extra_content}"
-
-        if not prompt:
-            yield event.plain_result("❌ 请提供图片生成的提示词或预设名称！")
-            return
-
-        # 获取参考图片
-        images_data = await self._get_reference_images_for_command(event)
-
-        # 发送确认
-        msg = "已开始生图任务"
-        if images_data:
-            msg += f"[{len(images_data)}张参考图]"
-        if matched_preset:
-            msg += f"[预设: {matched_preset}]"
-
-        logger.debug(
-            f"[Gemini Image] 参数解析 - 消息: {msg}, 比例: {aspect_ratio}, 分辨率: {resolution}"
-        )
+                        msg = (f"⚠️ **连接异常**\n"
+                               f"状态码: {status}\n"
+                               f"提示: 能连上但返回了错误。")
+                        
+        except asyncio.TimeoutError:
+            msg = (f"❌ **连接超时 (Timeout)**\n"
+                   f"原因: 10秒内无法连接到 Google 服务器。\n"
+                   f"建议: 请检查代理地址是否正确，或代理软件是否允许外部连接。")
+        except Exception as e:
+            msg = f"❌ **连接失败**\n错误: {str(e)}"
 
         yield event.plain_result(msg)
 
-        # 生成任务 ID
-        task_id = hashlib.md5(f"{time.time()}{user_id}".encode()).hexdigest()[:8]
-
-        # 记录任务摘要
-        preset_name = matched_preset if matched_preset else "无"
-        img_count = len(images_data) if images_data else 0
-        logger.info(
-            f"[Gemini Image] 任务摘要 [{task_id}] - 提示词: {prompt} | 预设: {preset_name} | 参考图: {img_count}张 | 分辨率: {resolution} | 比例: {aspect_ratio}"
-        )
-
-        # 创建后台任务
-        self.create_background_task(
-            self._generate_and_send_image_async(
-                prompt=prompt,
-                images_data=images_data or None,
-                unified_msg_origin=event.unified_msg_origin,
-                aspect_ratio=aspect_ratio,
-                resolution=resolution,
-                task_id=task_id,
-            )
-        )
-
-    async def _fetch_images_from_event(
-        self, event: AstrMessageEvent
-    ) -> list[tuple[bytes, str]]:
-        """从事件中提取所有相关图片（当前消息、引用消息、At用户头像）"""
-        images_data = []
-
-        if not event.message_obj.message:
-            return images_data
-
-        logger.debug(
-            f"[Gemini Image] Searching images from event components: {event.message_obj.message}"
-        )
-
-        # 0. 预扫描：获取回复发送者ID和统计At次数
-        reply_sender_id = None
-        at_counts = {}
-
-        for component in event.message_obj.message:
-            if isinstance(component, Comp.Reply):
-                if hasattr(component, "sender_id") and component.sender_id:
-                    reply_sender_id = str(component.sender_id)
-            elif isinstance(component, Comp.At):
-                if component.qq != "all":
-                    uid = str(component.qq)
-                    at_counts[uid] = at_counts.get(uid, 0) + 1
-
-        # 遍历消息组件
-        for component in event.message_obj.message:
-            # 1. 处理直接发送的图片
-            if isinstance(component, Comp.Image):
-                url = component.url or component.file
-                if url and (data := await self._download_image(url)):
-                    images_data.append(data)
-
-            # 2. 处理引用消息中的图片
-            elif isinstance(component, Comp.Reply):
-                if component.chain:
-                    for sub_comp in component.chain:
-                        if isinstance(sub_comp, Comp.Image):
-                            url = sub_comp.url or sub_comp.file
-                            if url and (data := await self._download_image(url)):
-                                images_data.append(data)
-
-            # 3. 处理 At 用户（获取头像）
-            elif isinstance(component, Comp.At):
-                if component.qq != "all":  # 忽略 @全体成员
-                    uid = str(component.qq)
-
-                    # 核心逻辑：判断是否是引用消息带来的自动 @
-                    if reply_sender_id and uid == reply_sender_id:
-                        # 如果该 ID 只出现了一次 At，且是引用消息的发送者，则认为是自动 @，忽略头像
-                        if at_counts.get(uid, 0) == 1:
-                            logger.debug(
-                                f"[Gemini Image] Ignoring auto-At for reply sender {uid}"
-                            )
-                            continue
-                        # 如果出现多次，说明用户显式 @ 了（除了自动 @ 之外），保留
-
-                    # 核心逻辑2：判断是否是触发机器人的 At
-                    # 如果 Bot 被 At 了正好一次，通常是作为指令触发前缀，忽略头像
-                    # 如果 Bot 被 At 了多次，说明用户显式引用了 Bot 头像
-                    self_id = str(event.get_self_id()).strip()
-                    if self_id and uid == self_id:
-                        if at_counts.get(uid, 0) == 1:
-                            logger.debug(
-                                f"[Gemini Image] Ignoring bot trigger At {uid}"
-                            )
-                            continue
-
-                    if avatar_data := await self.get_avatar(uid):
-                        images_data.append((avatar_data, "image/jpeg"))
-
-        return images_data
-
-    async def _get_reference_images_for_command(
-        self, event: AstrMessageEvent
-    ) -> list[tuple[bytes, str]]:
-        """为指令获取参考图片"""
-        return await self._fetch_images_from_event(event)
+    @filter.command("生图调试")
+    async def debug_switch(self, event: AstrMessageEvent):
+        """开关调试模式"""
+        self.debug_mode = not self.debug_mode
+        self.config["generate_config"]["debug_mode"] = self.debug_mode
+        self.config.save_config()
+        yield event.plain_result(f"🔧 调试模式: {'✅ 开启' if self.debug_mode else '⛔ 关闭'}")
 
     @filter.command("生图模型")
     async def model_command(self, event: AstrMessageEvent, model_index: str = ""):
@@ -723,7 +401,7 @@ class GeminiImagePlugin(Star):
             yield event.plain_result("❌ 您没有权限使用此功能")
             return
 
-        # user_id 已经是正确的ID了，不需要重新赋值（注意下面还有一行 event.unified_msg_origin 获取 mask_uid 的逻辑，可能需要调整）
+        # user_id 已经是正确的ID了
         masked_uid = (
             user_id[:4] + "****" + user_id[-4:] if len(user_id) > 8 else user_id
         )
@@ -771,154 +449,148 @@ class GeminiImagePlugin(Star):
                 self.config.save_config()
                 yield event.plain_result(f"✅ 预设已删除: {name}")
             else:
-                yield event.plain_result(f"❌ 预设不存在: {name}")
+                yield event.plain_result(f"❌ 未找到预设: {name}")
+        else:
+             yield event.plain_result("❌ 格式错误，请使用：\n/预设\n/预设 添加 名称:内容\n/预设 删除 名称")
 
-    async def _get_reference_images_for_tool(
-        self, event: AstrMessageEvent
-    ) -> list[tuple[bytes, str]]:
-        """获取参考图片列表（用于工具调用）"""
-        # 从事件中获取（包含当前图片、引用图片、At头像）
-        images_data = await self._fetch_images_from_event(event)
-        return images_data
+    @filter.command("生图")
+    async def generate_image(self, event: AstrMessageEvent):
+        user_id = event.unified_msg_origin
+        group_id = getattr(event.message_obj, "group_id", None)
+        sender_id = str(event.message_obj.sender.user_id) if event.message_obj.sender else user_id
 
-    def create_background_task(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task:
-        """统一创建后台任务并追踪生命周期"""
-        task = asyncio.create_task(coro)
-        self.background_tasks.add(task)
-        task.add_done_callback(self.background_tasks.discard)
-        return task
+        #这里修改无权限回复文本
+        if not self._check_permission(sender_id, str(group_id) if group_id else None):
+            yield event.plain_result("❌ 无权使用喵！")
+            return
 
-    @staticmethod
-    async def get_avatar(user_id: str) -> bytes | None:
-        """下载QQ用户头像"""
-        url = f"https://q4.qlogo.cn/headimg_dl?dst_uin={user_id}&spec=640"
+        if not self._check_rate_limit(user_id):
+            yield event.plain_result("❌ 太快了喵！等一等喵！")
+            return
+
+        msg_str = (event.message_str or "").strip()
+        parts = msg_str.split(maxsplit=1)
+        if len(parts) < 2: return 
+        
+        raw_prompt = parts[1].strip()
+        prompt = raw_prompt
+        ar = self.default_aspect_ratio
+        res = self.default_resolution
+        
+        # 预设匹配
+        preset_key = raw_prompt.split()[0]
+        for k, v in self.presets.items():
+            if k.lower() == preset_key.lower():
+                try:
+                    if v.strip().startswith("{"):
+                        d = json.loads(v)
+                        prompt = d.get("prompt", prompt)
+                        ar = d.get("aspect_ratio", ar)
+                        res = d.get("resolution", res)
+                    else:
+                        prompt = v
+                    extra = raw_prompt[len(preset_key):].strip()
+                    if extra: prompt += " " + extra
+                except:
+                    prompt = v
+                break
+
+        if not prompt:
+            yield event.plain_result("❌ 提示词呢喵！")
+            return
+
+        yield event.plain_result("🎨 正在生成...")
+
+        refs = await self._fetch_images(event)
+        task_id = hashlib.md5(f"{time.time()}".encode()).hexdigest()[:6]
+        logger.info(f"[Gemini Image] 任务[{task_id}] | Proxy: {self.proxy}")
+        
+        self.create_background_task(
+            self._generate_and_send_image_async(
+                prompt, event.unified_msg_origin, refs, ar, res, task_id
+            )
+        )
+
+    async def _get_reference_images_for_tool(self, event: AstrMessageEvent) -> list[tuple[bytes, str]]:
+        """为 LLM 工具获取参考图片 (引用回复或当前消息)"""
+        return await self._fetch_images(event)
+
+    async def _fetch_images(self, event: AstrMessageEvent):
+        imgs = []
+        if not event.message_obj.message: return imgs
+        for comp in event.message_obj.message:
+            url = None
+            if isinstance(comp, Comp.Image): url = comp.url or comp.file
+            elif isinstance(comp, Comp.Reply) and comp.chain:
+                for c in comp.chain:
+                    if isinstance(c, Comp.Image): url = c.url or c.file
+            if url:
+                d = await self._download_img(url)
+                if d: imgs.append(d)
+            if isinstance(comp, Comp.At) and comp.qq != "all":
+                if str(comp.qq) != str(event.get_self_id()):
+                   d = await self.get_avatar(str(comp.qq))
+                   if d: imgs.append((d, "image/jpeg"))
+        return imgs
+
+    async def _download_img(self, url):
         try:
-            # 复用 astrbot 的下载工具
-            path = await download_image_by_url(url)
-            if path:
-                with open(path, "rb") as f:
-                    return f.read()
-        except Exception:
-            pass
-        return None
-
-    async def _download_image(self, url: str) -> tuple[bytes, str] | None:
-        """下载图片并返回数据与 MIME 类型 (Helper wrapper around core utility)"""
-        try:
-            data = None
-            # 尝试作为本地文件读取
+            # 优先检查本地文件 (兼容旧版行为)
             if os.path.exists(url) and os.path.isfile(url):
                 with open(url, "rb") as f:
                     data = f.read()
             else:
+                # 否则尝试下载
                 path = await download_image_by_url(url)
-                if path:
+                if path and os.path.exists(path):
                     with open(path, "rb") as f:
                         data = f.read()
+                else:
+                    return None
 
-            if not data:
-                return None
-
-            # 检查大小
-            if len(data) > self.max_image_size_mb * 1024 * 1024:
-                logger.warning(
-                    f"[Gemini Image] 图片超过大小限制 ({self.max_image_size_mb}MB)"
-                )
-                return None
-
-            # 简单推断 mime
-            mime = "image/png"
-            if data.startswith(b"\xff\xd8"):
-                mime = "image/jpeg"
-            elif data.startswith(b"GIF"):
-                mime = "image/gif"
-            elif data.startswith(b"RIFF") and b"WEBP" in data[:16]:
-                mime = "image/webp"
-
-            return data, mime
-        except Exception as e:
-            logger.error(f"[Gemini Image] 获取图片失败 (URL/Path: {url}): {e}")
+            if data and len(data) <= self.max_image_size_mb * 1024 * 1024:
+                return (data, "image/jpeg") 
+        except: pass
         return None
 
-    async def _generate_and_send_image_async(
-        self,
-        prompt: str,
-        unified_msg_origin: str,
-        images_data: list[tuple[bytes, str]] | None = None,
-        aspect_ratio: str = "1:1",
-        resolution: str = "1K",
-        task_id: str | None = None,
-    ):
-        """异步生成图片并发送"""
-        if not task_id:
-            task_id = hashlib.md5(
-                f"{time.time()}{unified_msg_origin}".encode()
-            ).hexdigest()[:8]
+    @staticmethod
+    async def get_avatar(uid):
+        url = f"https://q4.qlogo.cn/headimg_dl?dst_uin={uid}&spec=640"
+        path = await download_image_by_url(url)
+        if path:
+            with open(path, "rb") as f: return f.read()
+        return None
 
-        # 处理 "自动" 比例
-        final_ar = aspect_ratio
-        if aspect_ratio == "自动":
-            final_ar = None
+    def create_background_task(self, coro):
+        t = asyncio.create_task(coro)
+        self.background_tasks.add(t)
+        t.add_done_callback(self.background_tasks.discard)
 
+    async def _generate_and_send_image_async(self, prompt, target, refs, ar, res, tid):
+        if ar == "自动": ar = None
         async with self._generation_semaphore:
             try:
-                results, error = await self.generator.generate_image(
-                    prompt=prompt,
-                    images_data=images_data,
-                    aspect_ratio=final_ar,
-                    image_size=resolution,
-                    task_id=task_id,
+                imgs, err = await self.generator.generate_image(
+                    prompt=prompt, images_data=refs, aspect_ratio=ar, image_size=res, task_id=tid
                 )
-
-                if error:
-                    await self.context.send_message(
-                        unified_msg_origin,
-                        MessageChain().message(f"❌ 生成失败: {error}"),
-                    )
+                
+                if err:
+                    safe_err = self._sanitize_error_msg(str(err))
+                    msg = f"❌ 失败: {safe_err}"
+                    await self.context.send_message(target, MessageChain().message(msg))
                     return
 
-                if not results:
-                    return
-
-                logger.info(
-                    f"[Gemini Image] 任务完成 [{task_id}] - 生成了 {len(results)} 张图片"
-                )
-
-                # 构建消息链
                 chain = MessageChain()
-                cached_urls = []
-
-                for img_bytes in results:
-                    # 保存临时文件
-                    try:
-                        file_path = save_temp_img(img_bytes)
-                        chain.file_image(file_path)
-                        cached_urls.append(f"file://{file_path}")
-                    except Exception as e:
-                        logger.error(f"保存图片失败: {e}")
-
-                await self.context.send_message(unified_msg_origin, chain)
+                for i in imgs:
+                    p = save_temp_img(i)
+                    chain.file_image(p)
+                await self.context.send_message(target, chain)
 
             except Exception as e:
-                logger.error(f"[Gemini Image] 任务失败: {e}", exc_info=True)
-                await self.context.send_message(
-                    unified_msg_origin,
-                    MessageChain().message("❌ 生成过程中发生未知错误"),
-                )
+                logger.error(f"Generate Error: {e}", exc_info=True)
+                safe_e = self._sanitize_error_msg(str(e))
+                msg = f"❌ 发生内部错误: {safe_e}"
+                await self.context.send_message(target, MessageChain().message(msg))
 
     async def terminate(self):
-        """卸载清理"""
-        try:
-            # 1. 关闭生成器 session
-            if self.generator:
-                await self.generator.close_session()
-
-            # 2. 取消后台任务
-            for task in list(self.background_tasks):
-                if not task.done():
-                    task.cancel()
-
-            logger.info("[Gemini Image] 插件已卸载")
-
-        except Exception as e:
-            logger.error(f"[Gemini Image] 卸载清理出错: {e}")
+        if self.generator: await self.generator.close_session()
